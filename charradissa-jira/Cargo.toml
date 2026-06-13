@@ -1,0 +1,14 @@
+[package]
+name = "charradissa-jira"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+charradissa-core = { path = "../charradissa-core" }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+base64 = "0.22"

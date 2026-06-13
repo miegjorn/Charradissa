@@ -1,0 +1,22 @@
+[org]
+name = "acme"
+homeserver = "https://matrix.acme.internal"
+
+[backend]
+type = "matrix"
+
+[concierge]
+archival_interval_hours = 24
+convergence_interval_hours = 6
+daily_token_budget = 50000
+
+[approval]
+timeout_minutes = 60
+
+[tasks]
+type = "jira"
+base_url = "https://acme.atlassian.net"
+project_key = "PROJ"
+
+[projects]
+autodiscover = true

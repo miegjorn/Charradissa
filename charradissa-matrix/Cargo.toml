@@ -1,0 +1,17 @@
+[package]
+name = "charradissa-matrix"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+charradissa-core = { path = "../charradissa-core" }
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
