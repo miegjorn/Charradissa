@@ -1,10 +1,11 @@
-// placeholder — filled in Task 6
 use std::sync::Arc;
 use std::time::Duration;
 use chrono::Utc;
 use tokio::time::interval;
 use crate::backend::ChatBackend;
 use crate::farga::{FargaWriter, Signal};
+use crate::farcaster::milestone::MilestoneEvent;
+use crate::farcaster::system_agent::SystemAgent;
 use crate::types::{ChatEvent, ProjectId, RoomId, UserId};
 
 pub fn extract_signals(events: &[ChatEvent]) -> Vec<Signal> {
@@ -31,6 +32,8 @@ pub struct ConciergeAgent {
     archival_interval_hours: u64,
     convergence_interval_hours: u64,
     daily_token_budget: u32,
+    system_agents: Vec<Box<dyn SystemAgent>>,
+    system_agent_tick_intervals: Vec<Duration>,
 }
 
 impl ConciergeAgent {
@@ -43,8 +46,45 @@ impl ConciergeAgent {
         convergence_interval_hours: u64,
         daily_token_budget: u32,
     ) -> Self {
-        Self { backend, farga, projects, project_agent_ids,
-               archival_interval_hours, convergence_interval_hours, daily_token_budget }
+        Self {
+            backend, farga, projects, project_agent_ids,
+            archival_interval_hours, convergence_interval_hours, daily_token_budget,
+            system_agents: Vec::new(),
+            system_agent_tick_intervals: Vec::new(),
+        }
+    }
+
+    pub fn register_system_agent(&mut self, agent: Box<dyn SystemAgent>, tick_interval: Duration) {
+        self.system_agents.push(agent);
+        self.system_agent_tick_intervals.push(tick_interval);
+    }
+
+    pub async fn dispatch_milestone(&self, event: &MilestoneEvent) {
+        for agent in &self.system_agents {
+            if let Err(e) = agent.on_milestone(event).await {
+                tracing::error!("[{}] on_milestone error: {}", agent.name(), e);
+            }
+        }
+    }
+
+    pub async fn run_system_agent_ticks(&self) {
+        let mut ticker = interval(Duration::from_secs(60));
+        let mut next_tick: Vec<tokio::time::Instant> = self.system_agent_tick_intervals
+            .iter()
+            .map(|d| tokio::time::Instant::now() + *d)
+            .collect();
+        loop {
+            ticker.tick().await;
+            let now = tokio::time::Instant::now();
+            for (i, agent) in self.system_agents.iter().enumerate() {
+                if now >= next_tick[i] {
+                    if let Err(e) = agent.tick().await {
+                        tracing::error!("[{}] tick error: {}", agent.name(), e);
+                    }
+                    next_tick[i] = now + self.system_agent_tick_intervals[i];
+                }
+            }
+        }
     }
 
     pub async fn run_archival_loop(&self) {
@@ -82,9 +122,7 @@ impl ConciergeAgent {
                     Err(e) => tracing::error!("concierge: recent_signals failed for {}: {}", project, e),
                 }
             }
-
             if all_signals.is_empty() { continue; }
-
             tracing::info!("concierge convergence sweep: {} signals across {} projects",
                 all_signals.len(), self.projects.len());
         }
