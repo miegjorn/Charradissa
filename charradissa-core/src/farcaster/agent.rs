@@ -28,8 +28,8 @@ pub struct FarcasterAgent {
     pub digest_buffer: Mutex<Vec<DigestEntry>>,
     pub(crate) daily_reactive_token_budget: u32,
     pub(crate) daily_digest_token_budget: u32,
-    pub(crate) reactive_tokens_used: AtomicU32,
-    pub(crate) digest_tokens_used: AtomicU32,
+    pub reactive_tokens_used: AtomicU32,
+    pub digest_tokens_used: AtomicU32,
     pub(crate) digest_interval_hours: u64,
     pub(crate) last_digest_at: Mutex<DateTime<Utc>>,
 }

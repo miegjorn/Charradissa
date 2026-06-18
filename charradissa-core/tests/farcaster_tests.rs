@@ -431,3 +431,66 @@ async fn tick_requeues_entries_on_farga_failure() {
     let buf = agent.digest_buffer.lock().await;
     assert_eq!(buf.len(), 1, "entry should be re-queued after Farga failure");
 }
+
+// --- Task 9 tests ---
+
+#[tokio::test]
+async fn reactive_budget_exhausted_defers_to_digest_without_calling_analyzer() {
+    let projects = vec![ProjectId::new("alpha"), ProjectId::new("beta")];
+    let (agent, dms, _, _, _analyzer) = make_agent(projects, HashMap::new());
+
+    // Exhaust the reactive budget
+    agent.reactive_tokens_used.store(20_000, std::sync::atomic::Ordering::Relaxed);
+
+    let event = MilestoneEvent::ArtifactProduced {
+        mission_id: "m1".into(),
+        session_id: "s1".into(),
+        project_id: ProjectId::new("alpha"),
+        canvas_id: "c1".into(),
+        artifact_summary: "some artifact".into(),
+        sub_objective_ids: vec![],
+    };
+
+    // No response queued in analyzer — would panic if called
+    agent.on_milestone(&event).await.unwrap();
+
+    // Should NOT have called analyzer (no queue pop) and NOT DM'd anyone
+    assert!(dms.lock().await.is_empty(), "budget exhaustion should skip DMs");
+
+    // But should have added a deferred entry to digest_buffer
+    let digest = agent.digest_buffer.lock().await;
+    assert_eq!(digest.len(), 1, "deferred entry should be in digest_buffer");
+    assert!(digest[0].connection_summary.contains("deferred"),
+        "deferred entry summary should indicate it was deferred");
+}
+
+#[tokio::test]
+async fn digest_budget_exhausted_requeues_buffer_without_calling_analyzer() {
+    let (agent, _, _, farga_calls, _analyzer) = make_agent(vec![], HashMap::new());
+
+    // Exhaust the digest budget
+    agent.digest_tokens_used.store(10_000, std::sync::atomic::Ordering::Relaxed);
+
+    // Add an entry to the buffer
+    {
+        let mut buf = agent.digest_buffer.lock().await;
+        buf.push(DigestEntry {
+            project_id: ProjectId::new("alpha"),
+            connection_summary: "pending entry".into(),
+            involved_projects: vec![],
+            concurrence: vec![],
+            urgency: Urgency::Low,
+            whispered_at: None,
+        });
+    }
+
+    // No response queued in analyzer — would panic if called
+    agent.tick().await.unwrap();
+
+    // No Farga call
+    assert!(farga_calls.lock().await.is_empty());
+
+    // Buffer re-queued
+    let buf = agent.digest_buffer.lock().await;
+    assert_eq!(buf.len(), 1, "buffer should be re-queued when digest budget exhausted");
+}
