@@ -46,6 +46,7 @@ pub struct DigestEntry {
     pub concurrence: Vec<AgentConcurrence>,
     pub urgency: Urgency,
     pub whispered_at: Option<DateTime<Utc>>,
+    pub first_observed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

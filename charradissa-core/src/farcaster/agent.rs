@@ -110,6 +110,7 @@ impl FarcasterAgent {
                 concurrence: vec![],
                 urgency: Urgency::Low,
                 whispered_at: None,
+                first_observed_at: Utc::now(),
             });
             return Ok(());
         }
@@ -169,6 +170,7 @@ impl FarcasterAgent {
                     concurrence,
                     urgency: conn.urgency,
                     whispered_at: if is_whispered { Some(now) } else { None },
+                    first_observed_at: now,
                 });
             }
         }

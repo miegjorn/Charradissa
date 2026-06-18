@@ -325,6 +325,7 @@ async fn tick_synthesizes_and_broadcasts_digest() {
             concurrence: vec![],
             urgency: Urgency::Medium,
             whispered_at: Some(chrono::Utc::now()),
+            first_observed_at: chrono::Utc::now(),
         });
     }
 
@@ -359,6 +360,7 @@ async fn tick_submits_to_farga_on_submit_verdict() {
             concurrence: vec![],
             urgency: Urgency::High,
             whispered_at: None,
+            first_observed_at: chrono::Utc::now(),
         });
     }
 
@@ -416,6 +418,7 @@ async fn tick_requeues_entries_on_farga_failure() {
             concurrence: vec![],
             urgency: Urgency::Low,
             whispered_at: None,
+            first_observed_at: chrono::Utc::now(),
         });
     }
 
@@ -484,6 +487,7 @@ async fn digest_budget_exhausted_requeues_buffer_without_calling_analyzer() {
             concurrence: vec![],
             urgency: Urgency::Low,
             whispered_at: None,
+            first_observed_at: chrono::Utc::now(),
         });
     }
 
