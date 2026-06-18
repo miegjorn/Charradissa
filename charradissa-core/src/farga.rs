@@ -52,6 +52,8 @@ impl FargaWriter for HttpFargaWriter {
         self.client.post(&url)
             .json(&serde_json::json!({ "project": project.as_str(), "signals": signals }))
             .send().await
+            .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))?
+            .error_for_status()
             .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))?;
         Ok(())
     }
@@ -75,6 +77,8 @@ impl FargaWriter for HttpFargaWriter {
             .json(&contribution)
             .send()
             .await
+            .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))?
+            .error_for_status()
             .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))?;
         Ok(())
     }
