@@ -25,7 +25,7 @@ pub struct FarcasterAgent {
     pub(crate) projects: Vec<ProjectId>,
     pub(crate) project_agent_ids: HashMap<ProjectId, UserId>,
     pub(crate) event_buffer: Mutex<HashMap<ProjectId, VecDeque<MilestoneEvent>>>,
-    pub(crate) digest_buffer: Mutex<Vec<DigestEntry>>,
+    pub digest_buffer: Mutex<Vec<DigestEntry>>,
     pub(crate) daily_reactive_token_budget: u32,
     pub(crate) daily_digest_token_budget: u32,
     pub(crate) reactive_tokens_used: AtomicU32,
@@ -89,7 +89,90 @@ impl FarcasterAgent {
 
     // Reactive path — implemented in Task 7
     pub(crate) async fn handle_milestone(&self, event: &MilestoneEvent) -> Result<()> {
-        let _ = event;
+        // 1. Accumulate to event_buffer (hold lock briefly, release before any await)
+        {
+            let mut buf = self.event_buffer.lock().await;
+            let project_buf = buf.entry(event.project_id().clone()).or_default();
+            if project_buf.len() >= EVENT_BUFFER_CAP { project_buf.pop_front(); }
+            project_buf.push_back(event.clone());
+        }
+
+        // 2. Filter — skip insignificant events
+        if !Self::is_significant(event) { return Ok(()); }
+
+        // 3. Budget check — defer to digest if exhausted
+        if self.reactive_tokens_used.load(Ordering::Relaxed) >= self.daily_reactive_token_budget {
+            tracing::info!("farcaster: reactive budget exhausted, deferring to digest");
+            self.digest_buffer.lock().await.push(DigestEntry {
+                project_id: event.project_id().clone(),
+                connection_summary: format!("deferred (budget): {}", event.summary()),
+                involved_projects: vec![event.project_id().clone()],
+                concurrence: vec![],
+                urgency: Urgency::Low,
+                whispered_at: None,
+            });
+            return Ok(());
+        }
+
+        // 4. Build snapshot (lock released before analyze call)
+        let snapshot = self.build_snapshot().await;
+
+        // 5. Analyze — best-effort, log and return on failure
+        let (connections, tokens_used) = match self.analyzer.analyze_cross_space(event, &snapshot).await {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::error!("farcaster: analyze_cross_space failed: {}", e);
+                return Ok(());
+            }
+        };
+        self.reactive_tokens_used.fetch_add(tokens_used, Ordering::Relaxed);
+
+        // 6. Whisper Medium/High urgency connections
+        let now = Utc::now();
+        for conn in &connections {
+            if matches!(conn.urgency, Urgency::Medium | Urgency::High) {
+                if let Some(agent_id) = self.project_agent_ids.get(&conn.to_project) {
+                    let msg = format!(
+                        "[farcaster] {}: {}\nSuggested: {}",
+                        conn.from_project,
+                        event.summary(),
+                        conn.summary
+                    );
+                    if let Err(e) = self.backend.send_dm(agent_id, &msg).await {
+                        tracing::warn!("farcaster: dm delivery failed for {}: {}", conn.to_project, e);
+                    }
+                }
+            }
+        }
+
+        // 7. Record all connections to digest_buffer
+        {
+            let mut digest = self.digest_buffer.lock().await;
+            for conn in connections {
+                let is_whispered = matches!(conn.urgency, Urgency::Medium | Urgency::High);
+                let concurrence = if is_whispered {
+                    self.project_agent_ids.get(&conn.to_project).map(|uid| {
+                        vec![AgentConcurrence {
+                            project_id: conn.to_project.to_string(),
+                            agent_address: uid.to_string(),
+                            concurrence_type: ConcurrenceType::Whispered,
+                            note: None,
+                        }]
+                    }).unwrap_or_default()
+                } else {
+                    vec![]
+                };
+                digest.push(DigestEntry {
+                    project_id: conn.from_project.clone(),
+                    connection_summary: conn.summary.clone(),
+                    involved_projects: vec![conn.from_project, conn.to_project],
+                    concurrence,
+                    urgency: conn.urgency,
+                    whispered_at: if is_whispered { Some(now) } else { None },
+                });
+            }
+        }
+
         Ok(())
     }
 

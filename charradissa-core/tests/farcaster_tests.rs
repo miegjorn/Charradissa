@@ -14,7 +14,7 @@ use charradissa_core::farcaster::analyzer::{
     CrossSpaceConnection, CrossSpaceSnapshot, DigestEntry, DigestSynthesis, FarcasterAnalyzer,
 };
 use charradissa_core::farcaster::milestone::MilestoneEvent as _MilestoneEvent;
-use charradissa_core::farcaster::FarcasterAgent;
+use charradissa_core::farcaster::{FarcasterAgent, SystemAgent};
 use charradissa_core::types::{
     ChatEvent, CompositionAddress, RoomId, RoomOptions, SpaceId, UserId,
 };
@@ -197,4 +197,103 @@ fn agent_concurrence_round_trips_json() {
     let back: AgentConcurrence = serde_json::from_str(&json).unwrap();
     assert_eq!(back.project_id, "alpha");
     assert_eq!(back.concurrence_type, ConcurrenceType::Whispered);
+}
+
+// --- Task 7 tests ---
+
+#[tokio::test]
+async fn insignificant_events_skip_analyzer() {
+    let (agent, _, _, _, _analyzer) = make_agent(
+        vec![ProjectId::new("alpha"), ProjectId::new("beta")],
+        HashMap::new(),
+    );
+    // EvaluationCompleted with satisfied=false is NOT significant
+    let event = MilestoneEvent::EvaluationCompleted {
+        mission_id: "m1".into(),
+        project_id: ProjectId::new("alpha"),
+        sub_objective_id: "obj-1".into(),
+        satisfied: false,
+        reason: "not done yet".into(),
+    };
+    agent.on_milestone(&event).await.unwrap();
+    // digest_buffer should be empty (no deferred entry either)
+    let digest = agent.digest_buffer.lock().await;
+    assert!(digest.is_empty(), "insignificant event should not populate digest_buffer");
+}
+
+#[tokio::test]
+async fn significant_event_triggers_analysis_and_dm() {
+    let projects = vec![ProjectId::new("alpha"), ProjectId::new("beta")];
+    let beta_agent_id = UserId::new("@beta-agent:matrix.test");
+    let mut ids = HashMap::new();
+    ids.insert(ProjectId::new("beta"), beta_agent_id.clone());
+
+    let (agent, dms, _, _, analyzer) = make_agent(projects, ids);
+
+    // Queue a High-urgency connection from alpha → beta
+    analyzer.queue_reactive(vec![
+        CrossSpaceConnection {
+            from_project: ProjectId::new("alpha"),
+            to_project: ProjectId::new("beta"),
+            connection_type: "solved_problem".into(),
+            summary: "auth schema resolution is applicable here".into(),
+            urgency: Urgency::High,
+        },
+    ], 100);
+
+    let event = MilestoneEvent::ArtifactProduced {
+        mission_id: "m1".into(),
+        session_id: "s1".into(),
+        project_id: ProjectId::new("alpha"),
+        canvas_id: "auth".into(),
+        artifact_summary: "finalized auth schema".into(),
+        sub_objective_ids: vec![],
+    };
+
+    agent.on_milestone(&event).await.unwrap();
+
+    // DM should have been sent to beta-agent
+    let sent_dms = dms.lock().await;
+    assert_eq!(sent_dms.len(), 1, "expected one DM to beta agent");
+    assert_eq!(sent_dms[0].0, beta_agent_id);
+    assert!(sent_dms[0].1.contains("[farcaster]"), "DM should be tagged");
+    assert!(sent_dms[0].1.contains("auth schema resolution"), "DM should include connection summary");
+
+    // DigestEntry should be recorded
+    let digest = agent.digest_buffer.lock().await;
+    assert_eq!(digest.len(), 1);
+    assert!(digest[0].whispered_at.is_some(), "High urgency should set whispered_at");
+}
+
+#[tokio::test]
+async fn low_urgency_connection_skips_dm_but_records_digest_entry() {
+    let projects = vec![ProjectId::new("alpha"), ProjectId::new("beta")];
+    let mut ids = HashMap::new();
+    ids.insert(ProjectId::new("beta"), UserId::new("@beta:t"));
+    let (agent, dms, _, _, analyzer) = make_agent(projects, ids);
+
+    analyzer.queue_reactive(vec![
+        CrossSpaceConnection {
+            from_project: ProjectId::new("alpha"),
+            to_project: ProjectId::new("beta"),
+            connection_type: "convergence_opportunity".into(),
+            summary: "might share a library eventually".into(),
+            urgency: Urgency::Low,
+        },
+    ], 50);
+
+    let event = MilestoneEvent::ArtifactProduced {
+        mission_id: "m1".into(),
+        session_id: "s1".into(),
+        project_id: ProjectId::new("alpha"),
+        canvas_id: "c1".into(),
+        artifact_summary: "drafted new API".into(),
+        sub_objective_ids: vec![],
+    };
+    agent.on_milestone(&event).await.unwrap();
+
+    assert!(dms.lock().await.is_empty(), "Low urgency should not DM");
+    let digest = agent.digest_buffer.lock().await;
+    assert_eq!(digest.len(), 1);
+    assert!(digest[0].whispered_at.is_none(), "Low urgency should not set whispered_at");
 }
