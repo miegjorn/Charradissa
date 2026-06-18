@@ -637,6 +637,12 @@ fn farga_layer_variants_serialize_to_distinct_strings() {
 }
 
 #[test]
+fn http_farga_writer_is_send_sync() {
+    fn _assert_send_sync<T: Send + Sync>() {}
+    _assert_send_sync::<charradissa_core::farga::HttpFargaWriter>();
+}
+
+#[test]
 fn all_reversibility_and_impact_variants_serialize() {
     let rev = [
         ReversibilityLevel::FullyReversible,

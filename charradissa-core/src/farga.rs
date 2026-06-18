@@ -64,4 +64,18 @@ impl FargaWriter for HttpFargaWriter {
         resp.json().await
             .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))
     }
+
+    async fn submit_governance_contribution(
+        &self,
+        contribution: GovernanceContribution,
+    ) -> Result<()> {
+        let url = format!("{}/governance", self.base_url);
+        self.client
+            .post(&url)
+            .json(&contribution)
+            .send()
+            .await
+            .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))?;
+        Ok(())
+    }
 }
