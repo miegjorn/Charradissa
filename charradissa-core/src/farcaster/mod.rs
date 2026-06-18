@@ -11,6 +11,6 @@ pub use analyzer::{
     FarcasterAnalyzer, CrossSpaceSnapshot, ProjectSnapshot,
     CrossSpaceConnection, DigestSynthesis, DigestEntry, DigestPayload,
 };
-// pub use system_agent::SystemAgent;
+pub use system_agent::SystemAgent;
 // pub use agent::FarcasterAgent;
 // pub use claude_analyzer::ClaudeFarcasterAnalyzer;
