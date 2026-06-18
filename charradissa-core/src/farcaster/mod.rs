@@ -13,4 +13,4 @@ pub use analyzer::{
 };
 pub use system_agent::SystemAgent;
 pub use agent::FarcasterAgent;
-// pub use claude_analyzer::ClaudeFarcasterAnalyzer;
+pub use claude_analyzer::ClaudeFarcasterAnalyzer;

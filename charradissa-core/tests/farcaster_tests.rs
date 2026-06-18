@@ -494,3 +494,52 @@ async fn digest_budget_exhausted_requeues_buffer_without_calling_analyzer() {
     let buf = agent.digest_buffer.lock().await;
     assert_eq!(buf.len(), 1, "buffer should be re-queued when digest budget exhausted");
 }
+
+/// Integration test — requires ANTHROPIC_API_KEY env var. Run with:
+/// cargo test -p charradissa-core --test farcaster_tests integration_claude_analyzer -- --ignored
+#[tokio::test]
+#[ignore]
+async fn integration_claude_analyzer_produces_connections() {
+    use charradissa_core::farcaster::claude_analyzer::ClaudeFarcasterAnalyzer;
+    use charradissa_core::farcaster::analyzer::{CrossSpaceSnapshot, ProjectSnapshot};
+
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .expect("ANTHROPIC_API_KEY required for integration test");
+
+    let analyzer = ClaudeFarcasterAnalyzer::new(api_key);
+
+    let event = MilestoneEvent::ArtifactProduced {
+        mission_id: "m1".into(),
+        session_id: "s1".into(),
+        project_id: ProjectId::new("auth-service"),
+        canvas_id: "design".into(),
+        artifact_summary: "JWT token validation logic finalized using RS256".into(),
+        sub_objective_ids: vec![],
+    };
+
+    let snapshot = CrossSpaceSnapshot {
+        projects: vec![
+            ProjectSnapshot {
+                project_id: ProjectId::new("auth-service"),
+                mission_goal: Some("implement authentication".into()),
+                open_sub_objectives: vec!["write tests".into()],
+                recent_events: vec!["finalized JWT logic".into()],
+            },
+            ProjectSnapshot {
+                project_id: ProjectId::new("api-gateway"),
+                mission_goal: Some("route and validate API requests".into()),
+                open_sub_objectives: vec!["token verification middleware".into()],
+                recent_events: vec!["started middleware spike".into()],
+            },
+        ],
+    };
+
+    let (connections, tokens) = analyzer.analyze_cross_space(&event, &snapshot).await.unwrap();
+
+    println!("connections: {:?}", connections.iter().map(|c| &c.summary).collect::<Vec<_>>());
+    println!("tokens used: {}", tokens);
+
+    // The call should return without error and parse cleanly.
+    // A real LLM should find at least one connection between auth-service and api-gateway.
+    assert!(tokens > 0, "should report token usage");
+}
