@@ -1,7 +1,14 @@
 mod registry;
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use charradissa_core::config::Config;
+use charradissa_core::concierge::ConciergeAgent;
+use charradissa_core::farcaster::MilestoneEvent;
+use charradissa_core::farcaster::FarcasterAgent;
+use charradissa_core::farcaster::ClaudeFarcasterAnalyzer;
+use charradissa_core::farga::HttpFargaWriter;
 use charradissa_matrix::backend::MatrixBackend;
 use charradissa_matrix::appservice::AppserviceState;
 use axum::{routing::put, Router};
@@ -26,7 +33,61 @@ async fn main() -> anyhow::Result<()> {
         bot_user_id,
     ));
 
+    // Milestone broadcast channel — sender is used by appservice handlers (future task),
+    // receiver is consumed by the dispatch task below.
+    let (milestone_tx, mut milestone_rx) =
+        tokio::sync::broadcast::channel::<MilestoneEvent>(256);
+    let _ = milestone_tx; // suppress unused warning until appservice wiring is added
+
+    let anthropic_api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    let farga_base_url = std::env::var("FARGA_BASE_URL")
+        .unwrap_or_else(|_| "http://localhost:9000".into());
+
     let mut registry = registry::AgentRegistry::new();
+    let _ = &mut registry; // suppress unused warning — populated in future tasks
+
+    // ConciergeAgent owns the FarcasterAgent — no Arc needed for the agent itself.
+    let mut concierge = ConciergeAgent::new(
+        Arc::clone(&backend) as Arc<dyn charradissa_core::backend::ChatBackend>,
+        Arc::new(HttpFargaWriter::new(farga_base_url.clone())),
+        vec![],
+        HashMap::new(),
+        24, 6, 50_000,
+    );
+
+    concierge.register_system_agent(
+        Box::new(FarcasterAgent::new(
+            Arc::clone(&backend) as Arc<dyn charradissa_core::backend::ChatBackend>,
+            Arc::new(HttpFargaWriter::new(farga_base_url)),
+            Arc::new(ClaudeFarcasterAnalyzer::new(anthropic_api_key)),
+            vec![], // projects populated from config in a future task
+            HashMap::new(),
+        )),
+        Duration::from_secs(6 * 3600),
+    );
+
+    let concierge = Arc::new(concierge);
+
+    // Dispatch milestones from the broadcast channel to all registered system agents.
+    let concierge_dispatch = Arc::clone(&concierge);
+    tokio::spawn(async move {
+        loop {
+            match milestone_rx.recv().await {
+                Ok(event) => concierge_dispatch.dispatch_milestone(&event).await,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("farcaster: milestone receiver lagged, dropped {} events", n);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    // Run system agent tick loop (polls every 60s, calls tick() when interval elapses).
+    let concierge_ticks = Arc::clone(&concierge);
+    tokio::spawn(async move {
+        concierge_ticks.run_system_agent_ticks().await;
+    });
+
     tracing::info!("charradissa-daemon starting for org: {}", config.org.name);
 
     let appservice_port = std::env::var("CHARRADISSA_PORT").unwrap_or("8448".into());
