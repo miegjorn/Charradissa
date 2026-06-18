@@ -9,3 +9,4 @@ pub mod approval;
 pub mod concierge;
 pub mod agents;
 pub mod transport;
+pub mod farcaster;
