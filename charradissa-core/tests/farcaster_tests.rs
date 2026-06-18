@@ -380,10 +380,10 @@ async fn tick_submits_to_farga_on_submit_verdict() {
     let (project_id, signals) = &calls[0];
     assert_eq!(project_id.as_str(), "system");
     assert_eq!(signals.len(), 1);
-    assert_eq!(signals[0].source, "farcaster");
-    // Verify title is in the serialized payload
-    assert!(signals[0].content.contains("Replan Budget Lessons"),
-        "content should include title");
+    assert_eq!(signals[0].source, "farcaster-governance");
+    let parsed: GovernanceContribution =
+        serde_json::from_str(&signals[0].content).unwrap();
+    assert_eq!(parsed.title, "Replan Budget Lessons");
 }
 
 #[tokio::test]
@@ -436,6 +436,50 @@ async fn tick_requeues_entries_on_farga_failure() {
     // Buffer should be re-queued due to failure
     let buf = agent.digest_buffer.lock().await;
     assert_eq!(buf.len(), 1, "entry should be re-queued after Farga failure");
+}
+
+#[tokio::test]
+async fn tick_emits_governance_contribution_on_submit_verdict() {
+    let projects = vec![ProjectId::new("alpha"), ProjectId::new("beta")];
+    let (agent, _, _, farga_calls, analyzer) = make_agent(projects, HashMap::new());
+
+    {
+        let mut buf = agent.digest_buffer.lock().await;
+        buf.push(DigestEntry {
+            project_id: ProjectId::new("alpha"),
+            connection_summary: "shared auth pattern".into(),
+            involved_projects: vec![ProjectId::new("alpha"), ProjectId::new("beta")],
+            concurrence: vec![],
+            urgency: Urgency::High,
+            whispered_at: None,
+            first_observed_at: chrono::Utc::now(),
+        });
+    }
+
+    analyzer.queue_digest(DigestSynthesis {
+        connections: vec!["alpha and beta both chose RS256".into()],
+        lessons: vec!["Use RS256 org-wide".into()],
+        open_questions: vec![],
+        farga_verdict: "submit".into(),
+        farga_title: Some("JWT Signing Pattern".into()),
+        farga_narrative: Some("Two projects independently converged on RS256.".into()),
+    }, 300);
+
+    agent.tick().await.unwrap();
+
+    let calls = farga_calls.lock().await;
+    assert_eq!(calls.len(), 1);
+    let (project_id, signals) = &calls[0];
+    assert_eq!(project_id.as_str(), "system");
+    assert_eq!(signals.len(), 1);
+    assert_eq!(signals[0].source, "farcaster-governance");
+    let parsed: GovernanceContribution =
+        serde_json::from_str(&signals[0].content).unwrap();
+    assert_eq!(parsed.title, "JWT Signing Pattern");
+    assert_eq!(parsed.event_count, 1);
+    assert_eq!(parsed.target_layer, FargaLayer::ProjectLevel);
+    assert!(parsed.reversibility.is_none());
+    assert!(parsed.impact.is_none());
 }
 
 // --- Task 9 tests ---

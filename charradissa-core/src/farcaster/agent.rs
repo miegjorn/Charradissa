@@ -6,12 +6,13 @@ use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
 use crate::backend::ChatBackend;
 use crate::error::Result;
-use crate::farga::{FargaWriter, Signal};
+use crate::farga::FargaWriter;
 use crate::types::{ProjectId, RoomId, UserId};
 use super::analyzer::{
-    CrossSpaceSnapshot, DigestEntry, DigestPayload, DigestSynthesis, FarcasterAnalyzer,
+    CrossSpaceSnapshot, DigestEntry, DigestSynthesis, FarcasterAnalyzer,
     ProjectSnapshot,
 };
+use super::governance::{GovernanceContribution, FargaLayer};
 use super::concurrence::{AgentConcurrence, ConcurrenceType, Urgency};
 use super::milestone::MilestoneEvent;
 use super::system_agent::SystemAgent;
@@ -216,29 +217,42 @@ impl FarcasterAgent {
             let period_end = Utc::now();
             let period_start = *self.last_digest_at.lock().await;
 
-            let payload = super::analyzer::DigestPayload {
+            let first_observed_at = entries.iter()
+                .map(|e| e.first_observed_at)
+                .min()
+                .unwrap_or(period_start);
+            let last_observed_at = entries.iter()
+                .map(|e| e.first_observed_at)
+                .max()
+                .unwrap_or(period_end);
+
+            let involved_projects: Vec<ProjectId> = {
+                let mut seen = std::collections::HashSet::new();
+                entries.iter()
+                    .flat_map(|e| e.involved_projects.iter().cloned())
+                    .filter(|p| seen.insert(p.clone()))
+                    .collect()
+            };
+
+            let contribution = GovernanceContribution {
                 title: synthesis.farga_title.clone().unwrap_or_default(),
                 narrative: synthesis.farga_narrative.clone().unwrap_or_default(),
                 lessons: synthesis.lessons.clone(),
                 open_questions: synthesis.open_questions.clone(),
-                period_start,
-                period_end,
-                projects_observed: self.projects.clone(),
-                concurrence: entries.iter().flat_map(|e| e.concurrence.iter().cloned()).collect(),
+                involved_projects,
+                concurrence: entries.iter()
+                    .flat_map(|e| e.concurrence.iter().cloned())
+                    .collect(),
+                target_layer: FargaLayer::ProjectLevel,
+                first_observed_at,
+                last_observed_at,
+                event_count: entries.len() as u32,
+                reversibility: None,
+                impact: None,
             };
 
-            let content = serde_json::to_string(&payload)
-                .map_err(|e| crate::error::CharradissaError::Dispatch(e.to_string()))?;
-
-            let signals = vec![Signal {
-                project: "system".to_string(),
-                content,
-                source: "farcaster".to_string(),
-            }];
-
-            let system_project = ProjectId::new("system");
-            if let Err(e) = self.farga.write_signals(&system_project, signals).await {
-                tracing::error!("farcaster: farga submission failed, re-queuing: {}", e);
+            if let Err(e) = self.farga.submit_governance_contribution(contribution).await {
+                tracing::error!("farcaster: governance submission failed, re-queuing: {}", e);
                 self.digest_buffer.lock().await.extend(entries);
                 return Ok(());
             }
