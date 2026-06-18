@@ -17,6 +17,8 @@ pub struct Signal {
 pub trait FargaWriter: Send + Sync {
     async fn write_signals(&self, project: &ProjectId, signals: Vec<Signal>) -> Result<()>;
     async fn recent_signals(&self, project: &ProjectId, since: Duration) -> Result<Vec<Signal>>;
+    // Fallback for testing and non-HTTP backends. Flattens the contribution into
+    // a Signal write. Real HTTP backends override this with a dedicated endpoint.
     async fn submit_governance_contribution(
         &self,
         contribution: GovernanceContribution,

@@ -16,7 +16,6 @@ use charradissa_core::farga::{FargaWriter, Signal};
 use charradissa_core::farcaster::analyzer::{
     CrossSpaceConnection, CrossSpaceSnapshot, DigestEntry, DigestSynthesis, FarcasterAnalyzer,
 };
-use charradissa_core::farcaster::milestone::MilestoneEvent as _MilestoneEvent;
 use charradissa_core::farcaster::{FarcasterAgent, SystemAgent};
 use charradissa_core::types::{
     ChatEvent, CompositionAddress, RoomId, RoomOptions, SpaceId, UserId,
@@ -58,12 +57,14 @@ impl ChatBackend for MockChatBackend {
 
 struct MockFargaWriter {
     calls: Arc<tokio::sync::Mutex<Vec<(ProjectId, Vec<Signal>)>>>,
+    governance_calls: Arc<tokio::sync::Mutex<Vec<GovernanceContribution>>>,
 }
 
 impl MockFargaWriter {
-    fn new() -> (Self, Arc<tokio::sync::Mutex<Vec<(ProjectId, Vec<Signal>)>>>) {
+    fn new() -> (Self, Arc<tokio::sync::Mutex<Vec<(ProjectId, Vec<Signal>)>>>, Arc<tokio::sync::Mutex<Vec<GovernanceContribution>>>) {
         let calls = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        (Self { calls: Arc::clone(&calls) }, calls)
+        let governance_calls = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        (Self { calls: Arc::clone(&calls), governance_calls: Arc::clone(&governance_calls) }, calls, governance_calls)
     }
 }
 
@@ -75,6 +76,13 @@ impl FargaWriter for MockFargaWriter {
     }
     async fn recent_signals(&self, _: &ProjectId, _: chrono::Duration) -> Result<Vec<Signal>> {
         Ok(vec![])
+    }
+    async fn submit_governance_contribution(
+        &self,
+        contribution: GovernanceContribution,
+    ) -> charradissa_core::error::Result<()> {
+        self.governance_calls.lock().await.push(contribution);
+        Ok(())
     }
 }
 
@@ -119,10 +127,11 @@ fn make_agent(projects: Vec<ProjectId>, agent_ids: HashMap<ProjectId, UserId>)
         Arc<tokio::sync::Mutex<Vec<(UserId, String)>>>,
         Arc<tokio::sync::Mutex<Vec<(RoomId, String)>>>,
         Arc<tokio::sync::Mutex<Vec<(ProjectId, Vec<Signal>)>>>,
-        Arc<MockFarcasterAnalyzer>)
+        Arc<MockFarcasterAnalyzer>,
+        Arc<tokio::sync::Mutex<Vec<GovernanceContribution>>>)
 {
     let (backend, dms, messages) = MockChatBackend::new();
-    let (farga, farga_calls) = MockFargaWriter::new();
+    let (farga, farga_calls, governance_calls) = MockFargaWriter::new();
     let analyzer = Arc::new(MockFarcasterAnalyzer::new());
     let agent = FarcasterAgent::new(
         Arc::new(backend),
@@ -131,13 +140,13 @@ fn make_agent(projects: Vec<ProjectId>, agent_ids: HashMap<ProjectId, UserId>)
         projects,
         agent_ids,
     );
-    (agent, dms, messages, farga_calls, analyzer)
+    (agent, dms, messages, farga_calls, analyzer, governance_calls)
 }
 
 // --- Task 6 test ---
 #[tokio::test]
 async fn farcaster_agent_new_initializes_with_defaults() {
-    let (agent, _, _, _, _) = make_agent(
+    let (agent, _, _, _, _, _) = make_agent(
         vec![ProjectId::new("alpha")],
         HashMap::new(),
     );
@@ -206,7 +215,7 @@ fn agent_concurrence_round_trips_json() {
 
 #[tokio::test]
 async fn insignificant_events_skip_analyzer() {
-    let (agent, _, _, _, _analyzer) = make_agent(
+    let (agent, _, _, _, _analyzer, _) = make_agent(
         vec![ProjectId::new("alpha"), ProjectId::new("beta")],
         HashMap::new(),
     );
@@ -231,7 +240,7 @@ async fn significant_event_triggers_analysis_and_dm() {
     let mut ids = HashMap::new();
     ids.insert(ProjectId::new("beta"), beta_agent_id.clone());
 
-    let (agent, dms, _, _, analyzer) = make_agent(projects, ids);
+    let (agent, dms, _, _, analyzer, _) = make_agent(projects, ids);
 
     // Queue a High-urgency connection from alpha → beta
     analyzer.queue_reactive(vec![
@@ -273,7 +282,7 @@ async fn low_urgency_connection_skips_dm_but_records_digest_entry() {
     let projects = vec![ProjectId::new("alpha"), ProjectId::new("beta")];
     let mut ids = HashMap::new();
     ids.insert(ProjectId::new("beta"), UserId::new("@beta:t"));
-    let (agent, dms, _, _, analyzer) = make_agent(projects, ids);
+    let (agent, dms, _, _, analyzer, _) = make_agent(projects, ids);
 
     analyzer.queue_reactive(vec![
         CrossSpaceConnection {
@@ -305,7 +314,7 @@ async fn low_urgency_connection_skips_dm_but_records_digest_entry() {
 
 #[tokio::test]
 async fn tick_with_empty_buffer_does_nothing() {
-    let (agent, _, _, farga_calls, _) = make_agent(vec![], HashMap::new());
+    let (agent, _, _, farga_calls, _, _) = make_agent(vec![], HashMap::new());
     agent.tick().await.unwrap();
     assert!(farga_calls.lock().await.is_empty());
 }
@@ -313,7 +322,7 @@ async fn tick_with_empty_buffer_does_nothing() {
 #[tokio::test]
 async fn tick_synthesizes_and_broadcasts_digest() {
     let projects = vec![ProjectId::new("alpha")];
-    let (agent, _, messages, _, analyzer) = make_agent(projects, HashMap::new());
+    let (agent, _, messages, _, analyzer, _) = make_agent(projects, HashMap::new());
 
     // Pre-populate digest_buffer directly
     {
@@ -349,7 +358,7 @@ async fn tick_synthesizes_and_broadcasts_digest() {
 #[tokio::test]
 async fn tick_submits_to_farga_on_submit_verdict() {
     let projects = vec![ProjectId::new("alpha")];
-    let (agent, _, _, farga_calls, analyzer) = make_agent(projects, HashMap::new());
+    let (agent, _, _, _, analyzer, governance_calls) = make_agent(projects, HashMap::new());
 
     {
         let mut buf = agent.digest_buffer.lock().await;
@@ -375,15 +384,9 @@ async fn tick_submits_to_farga_on_submit_verdict() {
 
     agent.tick().await.unwrap();
 
-    let calls = farga_calls.lock().await;
-    assert_eq!(calls.len(), 1, "expected one Farga write_signals call");
-    let (project_id, signals) = &calls[0];
-    assert_eq!(project_id.as_str(), "system");
-    assert_eq!(signals.len(), 1);
-    assert_eq!(signals[0].source, "farcaster-governance");
-    let parsed: GovernanceContribution =
-        serde_json::from_str(&signals[0].content).unwrap();
-    assert_eq!(parsed.title, "Replan Budget Lessons");
+    let gcalls = governance_calls.lock().await;
+    assert_eq!(gcalls.len(), 1, "expected one governance contribution");
+    assert_eq!(gcalls[0].title, "Replan Budget Lessons");
 }
 
 #[tokio::test]
@@ -441,7 +444,7 @@ async fn tick_requeues_entries_on_farga_failure() {
 #[tokio::test]
 async fn tick_emits_governance_contribution_on_submit_verdict() {
     let projects = vec![ProjectId::new("alpha"), ProjectId::new("beta")];
-    let (agent, _, _, farga_calls, analyzer) = make_agent(projects, HashMap::new());
+    let (agent, _, _, _, analyzer, governance_calls) = make_agent(projects, HashMap::new());
 
     {
         let mut buf = agent.digest_buffer.lock().await;
@@ -467,14 +470,9 @@ async fn tick_emits_governance_contribution_on_submit_verdict() {
 
     agent.tick().await.unwrap();
 
-    let calls = farga_calls.lock().await;
-    assert_eq!(calls.len(), 1);
-    let (project_id, signals) = &calls[0];
-    assert_eq!(project_id.as_str(), "system");
-    assert_eq!(signals.len(), 1);
-    assert_eq!(signals[0].source, "farcaster-governance");
-    let parsed: GovernanceContribution =
-        serde_json::from_str(&signals[0].content).unwrap();
+    let gcalls = governance_calls.lock().await;
+    assert_eq!(gcalls.len(), 1);
+    let parsed = &gcalls[0];
     assert_eq!(parsed.title, "JWT Signing Pattern");
     assert_eq!(parsed.event_count, 1);
     assert_eq!(parsed.target_layer, FargaLayer::ProjectLevel);
@@ -487,7 +485,7 @@ async fn tick_emits_governance_contribution_on_submit_verdict() {
 #[tokio::test]
 async fn reactive_budget_exhausted_defers_to_digest_without_calling_analyzer() {
     let projects = vec![ProjectId::new("alpha"), ProjectId::new("beta")];
-    let (agent, dms, _, _, _analyzer) = make_agent(projects, HashMap::new());
+    let (agent, dms, _, _, _analyzer, _) = make_agent(projects, HashMap::new());
 
     // Exhaust the reactive budget
     agent.reactive_tokens_used.store(20_000, std::sync::atomic::Ordering::Relaxed);
@@ -516,7 +514,7 @@ async fn reactive_budget_exhausted_defers_to_digest_without_calling_analyzer() {
 
 #[tokio::test]
 async fn digest_budget_exhausted_requeues_buffer_without_calling_analyzer() {
-    let (agent, _, _, farga_calls, _analyzer) = make_agent(vec![], HashMap::new());
+    let (agent, _, _, farga_calls, _analyzer, _) = make_agent(vec![], HashMap::new());
 
     // Exhaust the digest budget
     agent.digest_tokens_used.store(10_000, std::sync::atomic::Ordering::Relaxed);

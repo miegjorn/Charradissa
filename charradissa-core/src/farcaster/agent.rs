@@ -221,6 +221,7 @@ impl FarcasterAgent {
                 .map(|e| e.first_observed_at)
                 .min()
                 .unwrap_or(period_start);
+            // Approximates last_observed: DigestEntry only tracks first_observed_at.
             let last_observed_at = entries.iter()
                 .map(|e| e.first_observed_at)
                 .max()
