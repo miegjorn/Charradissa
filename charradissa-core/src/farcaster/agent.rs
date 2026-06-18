@@ -178,6 +178,72 @@ impl FarcasterAgent {
 
     // Digest path — implemented in Task 8
     pub(crate) async fn run_tick(&self) -> Result<()> {
+        // 1. Drain digest_buffer atomically
+        let entries = {
+            let mut buf = self.digest_buffer.lock().await;
+            if buf.is_empty() { return Ok(()); }
+            std::mem::take(&mut *buf)
+        };
+
+        // 2. Budget check — defer to next tick if exhausted
+        if self.digest_tokens_used.load(Ordering::Relaxed) >= self.daily_digest_token_budget {
+            tracing::info!("farcaster: digest budget exhausted, deferring to next tick");
+            self.digest_buffer.lock().await.extend(entries);
+            return Ok(());
+        }
+
+        // 3. Synthesize with Opus — requeue on failure
+        let (synthesis, tokens_used) = match self.analyzer.synthesize_digest(&entries).await {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::error!("farcaster: synthesize_digest failed: {}", e);
+                self.digest_buffer.lock().await.extend(entries);
+                return Ok(());
+            }
+        };
+        self.digest_tokens_used.fetch_add(tokens_used, Ordering::Relaxed);
+
+        // 4. Broadcast to #farcaster (best-effort)
+        let farcaster_room = RoomId::new("#farcaster");
+        if let Err(e) = self.backend.send_message(&farcaster_room, &format_digest(&synthesis)).await {
+            tracing::warn!("farcaster: broadcast failed: {}", e);
+        }
+
+        // 5. Farga submission if verdict is "submit"
+        if synthesis.farga_verdict == "submit" {
+            let period_end = Utc::now();
+            let period_start = *self.last_digest_at.lock().await;
+
+            let payload = super::analyzer::DigestPayload {
+                title: synthesis.farga_title.clone().unwrap_or_default(),
+                narrative: synthesis.farga_narrative.clone().unwrap_or_default(),
+                lessons: synthesis.lessons.clone(),
+                open_questions: synthesis.open_questions.clone(),
+                period_start,
+                period_end,
+                projects_observed: self.projects.clone(),
+                concurrence: entries.iter().flat_map(|e| e.concurrence.iter().cloned()).collect(),
+            };
+
+            let content = serde_json::to_string(&payload)
+                .map_err(|e| crate::error::CharradissaError::Dispatch(e.to_string()))?;
+
+            let signals = vec![Signal {
+                project: "system".to_string(),
+                content,
+                source: "farcaster".to_string(),
+            }];
+
+            let system_project = ProjectId::new("system");
+            if let Err(e) = self.farga.write_signals(&system_project, signals).await {
+                tracing::error!("farcaster: farga submission failed, re-queuing: {}", e);
+                self.digest_buffer.lock().await.extend(entries);
+                return Ok(());
+            }
+        }
+
+        // 6. Update last_digest_at
+        *self.last_digest_at.lock().await = Utc::now();
         Ok(())
     }
 }

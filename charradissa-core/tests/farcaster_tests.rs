@@ -297,3 +297,137 @@ async fn low_urgency_connection_skips_dm_but_records_digest_entry() {
     assert_eq!(digest.len(), 1);
     assert!(digest[0].whispered_at.is_none(), "Low urgency should not set whispered_at");
 }
+
+// --- Task 8 tests ---
+
+#[tokio::test]
+async fn tick_with_empty_buffer_does_nothing() {
+    let (agent, _, _, farga_calls, _) = make_agent(vec![], HashMap::new());
+    agent.tick().await.unwrap();
+    assert!(farga_calls.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn tick_synthesizes_and_broadcasts_digest() {
+    let projects = vec![ProjectId::new("alpha")];
+    let (agent, _, messages, _, analyzer) = make_agent(projects, HashMap::new());
+
+    // Pre-populate digest_buffer directly
+    {
+        let mut buf = agent.digest_buffer.lock().await;
+        buf.push(DigestEntry {
+            project_id: ProjectId::new("alpha"),
+            connection_summary: "shared auth approach".into(),
+            involved_projects: vec![ProjectId::new("alpha"), ProjectId::new("beta")],
+            concurrence: vec![],
+            urgency: Urgency::Medium,
+            whispered_at: Some(chrono::Utc::now()),
+        });
+    }
+
+    analyzer.queue_digest(DigestSynthesis {
+        connections: vec!["alpha and beta share auth approach".into()],
+        lessons: vec!["centralize auth early".into()],
+        open_questions: vec!["which library?".into()],
+        farga_verdict: "skip".into(),  // skip Farga submission in this test
+        farga_title: None,
+        farga_narrative: None,
+    }, 200);
+
+    agent.tick().await.unwrap();
+
+    let sent = messages.lock().await;
+    assert_eq!(sent.len(), 1, "digest should be broadcast to one room");
+    assert!(sent[0].1.contains("Farcaster Digest"), "broadcast should be formatted digest");
+    assert!(sent[0].1.contains("centralize auth early"), "digest should include lesson");
+}
+
+#[tokio::test]
+async fn tick_submits_to_farga_on_submit_verdict() {
+    let projects = vec![ProjectId::new("alpha")];
+    let (agent, _, _, farga_calls, analyzer) = make_agent(projects, HashMap::new());
+
+    {
+        let mut buf = agent.digest_buffer.lock().await;
+        buf.push(DigestEntry {
+            project_id: ProjectId::new("alpha"),
+            connection_summary: "important pattern".into(),
+            involved_projects: vec![ProjectId::new("alpha")],
+            concurrence: vec![],
+            urgency: Urgency::High,
+            whispered_at: None,
+        });
+    }
+
+    analyzer.queue_digest(DigestSynthesis {
+        connections: vec!["alpha discovered replan pattern".into()],
+        lessons: vec!["aggressive replan budgets waste tokens".into()],
+        open_questions: vec![],
+        farga_verdict: "submit".into(),
+        farga_title: Some("Replan Budget Lessons".into()),
+        farga_narrative: Some("Projects replanning aggressively see 40% token waste.".into()),
+    }, 500);
+
+    agent.tick().await.unwrap();
+
+    let calls = farga_calls.lock().await;
+    assert_eq!(calls.len(), 1, "expected one Farga write_signals call");
+    let (project_id, signals) = &calls[0];
+    assert_eq!(project_id.as_str(), "system");
+    assert_eq!(signals.len(), 1);
+    assert_eq!(signals[0].source, "farcaster");
+    // Verify title is in the serialized payload
+    assert!(signals[0].content.contains("Replan Budget Lessons"),
+        "content should include title");
+}
+
+#[tokio::test]
+async fn tick_requeues_entries_on_farga_failure() {
+    use charradissa_core::farcaster::analyzer::FarcasterAnalyzer;
+
+    struct FailingFarga;
+    #[async_trait]
+    impl FargaWriter for FailingFarga {
+        async fn write_signals(&self, _: &ProjectId, _: Vec<Signal>) -> Result<()> {
+            Err(CharradissaError::Backend("simulated failure".into()))
+        }
+        async fn recent_signals(&self, _: &ProjectId, _: chrono::Duration) -> Result<Vec<Signal>> { Ok(vec![]) }
+    }
+
+    let (backend, _, _) = MockChatBackend::new();
+    let analyzer = Arc::new(MockFarcasterAnalyzer::new());
+    let agent = FarcasterAgent::new(
+        Arc::new(backend),
+        Arc::new(FailingFarga),
+        Arc::clone(&analyzer) as Arc<dyn FarcasterAnalyzer>,
+        vec![],
+        HashMap::new(),
+    );
+
+    {
+        let mut buf = agent.digest_buffer.lock().await;
+        buf.push(DigestEntry {
+            project_id: ProjectId::new("alpha"),
+            connection_summary: "test entry".into(),
+            involved_projects: vec![],
+            concurrence: vec![],
+            urgency: Urgency::Low,
+            whispered_at: None,
+        });
+    }
+
+    analyzer.queue_digest(DigestSynthesis {
+        connections: vec![],
+        lessons: vec!["lesson".into()],
+        open_questions: vec![],
+        farga_verdict: "submit".into(),
+        farga_title: Some("T".into()),
+        farga_narrative: Some("N".into()),
+    }, 100);
+
+    agent.tick().await.unwrap();  // should not panic
+
+    // Buffer should be re-queued due to failure
+    let buf = agent.digest_buffer.lock().await;
+    assert_eq!(buf.len(), 1, "entry should be re-queued after Farga failure");
+}
