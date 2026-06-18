@@ -1,5 +1,8 @@
 use charradissa_core::farcaster::milestone::MilestoneEvent;
 use charradissa_core::farcaster::concurrence::{AgentConcurrence, ConcurrenceType, Urgency};
+use charradissa_core::farcaster::governance::{
+    GovernanceContribution, FargaLayer, ReversibilityLevel, ImpactScope,
+};
 use charradissa_core::types::ProjectId;
 
 // --- Shared test helpers (Tasks 6-9) ---
@@ -542,4 +545,72 @@ async fn integration_claude_analyzer_produces_connections() {
     // The call should return without error and parse cleanly.
     // A real LLM should find at least one connection between auth-service and api-gateway.
     assert!(tokens > 0, "should report token usage");
+}
+
+#[test]
+fn governance_contribution_serializes_round_trip() {
+    use charradissa_core::farcaster::concurrence::{AgentConcurrence, ConcurrenceType};
+
+    let contrib = GovernanceContribution {
+        title: "Auth pattern discovered".into(),
+        narrative: "Two projects independently chose RS256".into(),
+        lessons: vec!["Use RS256 for JWT signing".into()],
+        open_questions: vec!["Should we centralize key rotation?".into()],
+        involved_projects: vec![ProjectId::new("auth"), ProjectId::new("gateway")],
+        concurrence: vec![AgentConcurrence {
+            project_id: "auth".into(),
+            agent_address: "auth+adversarial".into(),
+            concurrence_type: ConcurrenceType::Whispered,
+            note: None,
+        }],
+        target_layer: FargaLayer::ProjectLevel,
+        first_observed_at: chrono::Utc::now(),
+        last_observed_at: chrono::Utc::now(),
+        event_count: 3,
+        reversibility: Some(ReversibilityLevel::FullyReversible),
+        impact: None,
+    };
+
+    let json = serde_json::to_string(&contrib).unwrap();
+    let decoded: GovernanceContribution = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded.title, "Auth pattern discovered");
+    assert_eq!(decoded.event_count, 3);
+    assert!(decoded.impact.is_none());
+    assert_eq!(decoded.reversibility, Some(ReversibilityLevel::FullyReversible));
+}
+
+#[test]
+fn farga_layer_variants_serialize_to_distinct_strings() {
+    let variants = [FargaLayer::OrgLevel, FargaLayer::InitiativeLevel, FargaLayer::ProjectLevel];
+    let serialized: Vec<String> = variants.iter()
+        .map(|v| serde_json::to_string(v).unwrap())
+        .collect();
+    let unique: std::collections::HashSet<_> = serialized.iter().collect();
+    assert_eq!(unique.len(), 3);
+    assert_eq!(serde_json::to_string(&FargaLayer::OrgLevel).unwrap(), r#""OrgLevel""#);
+}
+
+#[test]
+fn all_reversibility_and_impact_variants_serialize() {
+    let rev = [
+        ReversibilityLevel::FullyReversible,
+        ReversibilityLevel::EffectsLinger,
+        ReversibilityLevel::CostlyReversible,
+        ReversibilityLevel::Irreversible,
+    ];
+    let unique_rev: std::collections::HashSet<_> = rev.iter()
+        .map(|r| serde_json::to_string(r).unwrap())
+        .collect();
+    assert_eq!(unique_rev.len(), 4);
+
+    let imp = [
+        ImpactScope::Contained,
+        ImpactScope::CrossProject,
+        ImpactScope::DomainWide,
+        ImpactScope::OrgWide,
+    ];
+    let unique_imp: std::collections::HashSet<_> = imp.iter()
+        .map(|i| serde_json::to_string(i).unwrap())
+        .collect();
+    assert_eq!(unique_imp.len(), 4);
 }
