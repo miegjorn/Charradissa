@@ -16,12 +16,13 @@ use super::analyzer::{
     CrossSpaceSnapshot, DigestEntry, DigestSynthesis, FarcasterAnalyzer,
     ProjectSnapshot,
 };
-// GovernanceConfig and RiskTier re-imported via the governance module block above
 use super::governance::{GovernanceContribution, FargaLayer, ReversibilityLevel, ImpactScope};
 use super::governance::evaluate_governance;
 use super::concurrence::{AgentConcurrence, ConcurrenceType, Urgency};
 use super::milestone::MilestoneEvent;
+use super::observation::{DomainDigestEvent, ObservationEvent};
 use super::system_agent::SystemAgent;
+use super::upstream::UpstreamObserver;
 
 const EVENT_BUFFER_CAP: usize = 50;
 
@@ -39,6 +40,10 @@ pub struct FarcasterAgent {
     pub digest_tokens_used: AtomicU32,
     pub(crate) digest_interval_hours: u64,
     pub(crate) last_digest_at: Mutex<DateTime<Utc>>,
+    /// Domain name for this agent — set when used inside a DomainConcierge.
+    pub(crate) domain: Option<String>,
+    /// Upstream observer — receives a DomainDigestEvent after each successful digest synthesis.
+    pub(crate) upstream: Option<Arc<dyn UpstreamObserver>>,
 }
 
 impl FarcasterAgent {
@@ -63,7 +68,22 @@ impl FarcasterAgent {
             digest_tokens_used: AtomicU32::new(0),
             digest_interval_hours: 6,
             last_digest_at: Mutex::new(Utc::now()),
+            domain: None,
+            upstream: None,
         }
+    }
+
+    /// Set the domain name — used when building DomainDigestEvents for the upstream.
+    pub fn with_domain(mut self, domain: String) -> Self {
+        self.domain = Some(domain);
+        self
+    }
+
+    /// Wire an upstream observer that will receive a DomainDigestEvent after each
+    /// successful digest synthesis. Makes this agent the bottom level of the fractal hierarchy.
+    pub fn with_upstream(mut self, upstream: Arc<dyn UpstreamObserver>) -> Self {
+        self.upstream = Some(upstream);
+        self
     }
 
     pub(crate) fn is_significant(event: &MilestoneEvent) -> bool {
@@ -212,6 +232,19 @@ impl FarcasterAgent {
         };
         self.digest_tokens_used.fetch_add(tokens_used, Ordering::Relaxed);
 
+        // Collect data for upstream emission before the Farga block (which may early-return)
+        let period_start = *self.last_digest_at.lock().await;
+        let upstream_projects: Vec<ProjectId> = {
+            let mut seen = std::collections::HashSet::new();
+            entries.iter()
+                .flat_map(|e| e.involved_projects.iter().cloned())
+                .filter(|p| seen.insert(p.clone()))
+                .collect()
+        };
+        let upstream_concurrence: Vec<AgentConcurrence> = entries.iter()
+            .flat_map(|e| e.concurrence.iter().cloned())
+            .collect();
+
         // 4. Broadcast to #farcaster (best-effort)
         let farcaster_room = RoomId::new("#farcaster");
         if let Err(e) = self.backend.send_message(&farcaster_room, &format_digest(&synthesis)).await {
@@ -219,9 +252,9 @@ impl FarcasterAgent {
         }
 
         // 5. Farga submission if verdict is "submit"
+        let mut farga_node_id: Option<String> = None;
         if synthesis.farga_verdict == "submit" {
             let period_end = Utc::now();
-            let period_start = *self.last_digest_at.lock().await;
 
             let first_observed_at = entries.iter()
                 .map(|e| e.first_observed_at)
@@ -232,23 +265,13 @@ impl FarcasterAgent {
                 .max()
                 .unwrap_or(period_end);
 
-            let involved_projects: Vec<ProjectId> = {
-                let mut seen = std::collections::HashSet::new();
-                entries.iter()
-                    .flat_map(|e| e.involved_projects.iter().cloned())
-                    .filter(|p| seen.insert(p.clone()))
-                    .collect()
-            };
-
             let contribution = GovernanceContribution {
                 title: synthesis.farga_title.clone().unwrap_or_default(),
                 narrative: synthesis.farga_narrative.clone().unwrap_or_default(),
                 lessons: synthesis.lessons.clone(),
                 open_questions: synthesis.open_questions.clone(),
-                involved_projects,
-                concurrence: entries.iter()
-                    .flat_map(|e| e.concurrence.iter().cloned())
-                    .collect(),
+                involved_projects: upstream_projects.clone(),
+                concurrence: upstream_concurrence.clone(),
                 target_layer: FargaLayer::ProjectLevel,
                 first_observed_at,
                 last_observed_at,
@@ -295,13 +318,41 @@ impl FarcasterAgent {
                 let farga = Arc::clone(&self.farga);
                 let backend = Arc::clone(&self.backend);
                 tokio::spawn(poll_assessment_and_reevaluate(
-                    farga, backend, node_id, contribution_snapshot, gov_config,
+                    farga, backend, node_id.clone(), contribution_snapshot, gov_config,
                 ));
             }
+
+            farga_node_id = Some(node_id);
         }
 
         // 6. Update last_digest_at
         *self.last_digest_at.lock().await = Utc::now();
+
+        // 7. Emit to upstream observer (Phase II fractal link)
+        if let Some(ref upstream) = self.upstream {
+            let domain_name = self.domain.clone().unwrap_or_else(|| "default".to_string());
+            let title = synthesis.farga_title.clone()
+                .unwrap_or_else(|| {
+                    synthesis.connections.first().cloned()
+                        .unwrap_or_else(|| "digest".to_string())
+                });
+            let digest_event = DomainDigestEvent {
+                domain: domain_name,
+                title,
+                narrative: synthesis.farga_narrative.clone().unwrap_or_default(),
+                lessons: synthesis.lessons.clone(),
+                open_questions: synthesis.open_questions.clone(),
+                involved_projects: upstream_projects,
+                concurrence: upstream_concurrence,
+                period_start,
+                period_end: Utc::now(),
+                farga_node_id,
+            };
+            if let Err(e) = upstream.on_domain_digest(digest_event).await {
+                tracing::warn!("farcaster: upstream emission failed: {}", e);
+            }
+        }
+
         Ok(())
     }
 }
@@ -494,6 +545,12 @@ impl SystemAgent for FarcasterAgent {
     fn name(&self) -> &str { "farcaster" }
     async fn on_milestone(&self, event: &MilestoneEvent) -> Result<()> {
         self.handle_milestone(event).await
+    }
+    async fn on_observation(&self, event: &ObservationEvent) -> Result<()> {
+        match event {
+            ObservationEvent::Milestone(m) => self.handle_milestone(m).await,
+            ObservationEvent::DomainDigest(_) => Ok(()),
+        }
     }
     async fn tick(&self) -> Result<()> {
         self.run_tick().await

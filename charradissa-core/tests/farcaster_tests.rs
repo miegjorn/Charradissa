@@ -740,6 +740,11 @@ fn all_reversibility_and_impact_variants_serialize() {
 
 use charradissa_core::farcaster::governance::{derive_risk_factors, evaluate_governance};
 use amassada_core::governance::{GovernanceConfig, RiskTier};
+use charradissa_core::farcaster::{
+    CrossDomainAnalyzer, CrossDomainConnection, CrossDomainEntry, CrossDomainFarcaster,
+    CrossDomainSnapshot, DomainDigestEvent, DomainRegistry, ObservationEvent, UpstreamObserver,
+};
+use charradissa_core::farcaster::analyzer::DigestSynthesis as FarcasterDigestSynthesis;
 
 fn make_minimal_contribution() -> GovernanceContribution {
     GovernanceContribution {
@@ -841,4 +846,437 @@ fn evaluate_governance_org_wide_irreversible_is_critical() {
     let config = GovernanceConfig::default_weights();
     let composition = evaluate_governance(&contrib, &config);
     assert_eq!(composition.tier, RiskTier::Critical);
+}
+
+// ─── Phase II: Fractal hierarchy tests ────────────────────────────────────────
+
+// Shared mocks for Phase II
+
+use std::sync::Mutex as StdMutex;
+use std::collections::VecDeque as StdVecDeque;
+
+struct MockCrossDomainAnalyzer {
+    reactive: StdMutex<StdVecDeque<(Vec<CrossDomainConnection>, u32)>>,
+    digest: StdMutex<StdVecDeque<(FarcasterDigestSynthesis, u32)>>,
+}
+
+impl MockCrossDomainAnalyzer {
+    fn new() -> Self {
+        Self {
+            reactive: StdMutex::new(StdVecDeque::new()),
+            digest: StdMutex::new(StdVecDeque::new()),
+        }
+    }
+    fn queue_reactive(&self, conns: Vec<CrossDomainConnection>, tokens: u32) {
+        self.reactive.lock().unwrap().push_back((conns, tokens));
+    }
+    fn queue_digest(&self, synthesis: FarcasterDigestSynthesis, tokens: u32) {
+        self.digest.lock().unwrap().push_back((synthesis, tokens));
+    }
+}
+
+#[async_trait]
+impl CrossDomainAnalyzer for MockCrossDomainAnalyzer {
+    async fn analyze_cross_domain(
+        &self,
+        _: &DomainDigestEvent,
+        _: &CrossDomainSnapshot,
+    ) -> charradissa_core::error::Result<(Vec<CrossDomainConnection>, u32)> {
+        self.reactive.lock().unwrap().pop_front()
+            .ok_or_else(|| charradissa_core::error::CharradissaError::Dispatch("no queued reactive".into()))
+    }
+    async fn synthesize_cross_domain_digest(
+        &self,
+        _: &[CrossDomainEntry],
+    ) -> charradissa_core::error::Result<(FarcasterDigestSynthesis, u32)> {
+        self.digest.lock().unwrap().pop_front()
+            .ok_or_else(|| charradissa_core::error::CharradissaError::Dispatch("no queued digest".into()))
+    }
+}
+
+struct MockUpstreamObserver {
+    received: Arc<tokio::sync::Mutex<Vec<DomainDigestEvent>>>,
+}
+
+impl MockUpstreamObserver {
+    fn new() -> (Self, Arc<tokio::sync::Mutex<Vec<DomainDigestEvent>>>) {
+        let received = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        (Self { received: Arc::clone(&received) }, received)
+    }
+}
+
+#[async_trait]
+impl UpstreamObserver for MockUpstreamObserver {
+    async fn on_domain_digest(&self, event: DomainDigestEvent) -> charradissa_core::error::Result<()> {
+        self.received.lock().await.push(event);
+        Ok(())
+    }
+}
+
+fn make_domain_digest(domain: &str, title: &str) -> DomainDigestEvent {
+    DomainDigestEvent {
+        domain: domain.to_string(),
+        title: title.to_string(),
+        narrative: "test narrative".to_string(),
+        lessons: vec!["lesson one".to_string()],
+        open_questions: vec![],
+        involved_projects: vec![ProjectId::new("proj-a")],
+        concurrence: vec![],
+        period_start: chrono::Utc::now(),
+        period_end: chrono::Utc::now(),
+        farga_node_id: None,
+    }
+}
+
+// ─── ObservationEvent tests ───────────────────────────────────────────────────
+
+#[test]
+fn domain_digest_event_summary_contains_domain_and_title() {
+    let ev = make_domain_digest("engineering", "Auth convergence detected");
+    assert!(ev.summary().contains("engineering"));
+    assert!(ev.summary().contains("Auth convergence detected"));
+}
+
+#[test]
+fn observation_event_milestone_summary_delegates() {
+    let m = MilestoneEvent::MissionCompleted {
+        mission_id: "m1".into(),
+        project_id: ProjectId::new("alpha"),
+        goal: "ship it".into(),
+        completed_sub_objectives: vec![],
+        verdict: "submit".into(),
+    };
+    let obs = ObservationEvent::Milestone(m.clone());
+    assert_eq!(obs.summary(), m.summary());
+    assert!(obs.source_domain().is_none());
+}
+
+#[test]
+fn observation_event_domain_digest_summary_and_source() {
+    let digest = make_domain_digest("data", "Schema evolution pattern");
+    let obs = ObservationEvent::DomainDigest(digest);
+    assert!(obs.summary().contains("data"));
+    assert_eq!(obs.source_domain(), Some("data"));
+}
+
+// ─── SystemAgent default on_observation tests ─────────────────────────────────
+
+#[tokio::test]
+async fn system_agent_default_on_observation_delegates_milestone() {
+    use charradissa_core::farcaster::system_agent::SystemAgent;
+
+    struct CountingAgent { count: Arc<tokio::sync::Mutex<u32>> }
+    #[async_trait]
+    impl SystemAgent for CountingAgent {
+        fn name(&self) -> &str { "counter" }
+        async fn on_milestone(&self, _: &MilestoneEvent) -> charradissa_core::error::Result<()> {
+            *self.count.lock().await += 1;
+            Ok(())
+        }
+        async fn tick(&self) -> charradissa_core::error::Result<()> { Ok(()) }
+    }
+
+    let count = Arc::new(tokio::sync::Mutex::new(0u32));
+    let agent = CountingAgent { count: Arc::clone(&count) };
+
+    let milestone = MilestoneEvent::MissionCompleted {
+        mission_id: "m".into(), project_id: ProjectId::new("p"),
+        goal: "g".into(), completed_sub_objectives: vec![], verdict: "skip".into(),
+    };
+    agent.on_observation(&ObservationEvent::Milestone(milestone)).await.unwrap();
+    assert_eq!(*count.lock().await, 1, "milestone observation should delegate to on_milestone");
+
+    let digest = ObservationEvent::DomainDigest(make_domain_digest("eng", "t"));
+    agent.on_observation(&digest).await.unwrap();
+    assert_eq!(*count.lock().await, 1, "domain digest observation should be ignored by default");
+}
+
+// ─── DomainRegistry tests ─────────────────────────────────────────────────────
+
+#[test]
+fn domain_registry_derives_domain_from_composition_address() {
+    let mut addresses = HashMap::new();
+    addresses.insert(ProjectId::new("api-gateway"), "engineering/api-gateway".to_string());
+    addresses.insert(ProjectId::new("billing"), "business/billing".to_string());
+    let registry = DomainRegistry::from_composition_addresses(addresses);
+    assert_eq!(registry.domain_for(&ProjectId::new("api-gateway")), Some("engineering"));
+    assert_eq!(registry.domain_for(&ProjectId::new("billing")), Some("business"));
+}
+
+#[test]
+fn domain_registry_projects_in_domain_returns_correct_set() {
+    let mut addresses = HashMap::new();
+    addresses.insert(ProjectId::new("api"), "engineering/api".to_string());
+    addresses.insert(ProjectId::new("worker"), "engineering/worker".to_string());
+    addresses.insert(ProjectId::new("billing"), "business/billing".to_string());
+    let registry = DomainRegistry::from_composition_addresses(addresses);
+    let eng = registry.projects_in_domain("engineering");
+    assert_eq!(eng.len(), 2);
+    assert!(eng.contains(&ProjectId::new("api")));
+    assert!(eng.contains(&ProjectId::new("worker")));
+}
+
+#[test]
+fn domain_registry_all_domains_sorted() {
+    let mut addresses = HashMap::new();
+    addresses.insert(ProjectId::new("x"), "infra/x".to_string());
+    addresses.insert(ProjectId::new("y"), "data/y".to_string());
+    addresses.insert(ProjectId::new("z"), "engineering/z".to_string());
+    let registry = DomainRegistry::from_composition_addresses(addresses);
+    let domains = registry.all_domains();
+    assert_eq!(domains, vec!["data", "engineering", "infra"]);
+}
+
+// ─── CrossDomainFarcaster reactive path tests ─────────────────────────────────
+
+fn make_cross_domain_agent() -> (
+    Arc<CrossDomainFarcaster>,
+    Arc<tokio::sync::Mutex<Vec<(RoomId, String)>>>,
+    Arc<tokio::sync::Mutex<Vec<GovernanceContribution>>>,
+    Arc<MockCrossDomainAnalyzer>,
+) {
+    let (backend, _, messages) = MockChatBackend::new();
+    let (farga, _, governance_calls, _) = MockFargaWriter::new();
+    let analyzer = Arc::new(MockCrossDomainAnalyzer::new());
+    let agent = Arc::new(CrossDomainFarcaster::new(
+        Arc::new(backend),
+        Arc::new(farga),
+        Arc::clone(&analyzer) as Arc<dyn CrossDomainAnalyzer>,
+    ));
+    (agent, messages, governance_calls, analyzer)
+}
+
+#[tokio::test]
+async fn cross_domain_farcaster_buffers_incoming_digest() {
+    let (agent, _, _, analyzer) = make_cross_domain_agent();
+    analyzer.queue_reactive(vec![], 10);
+    let digest = make_domain_digest("engineering", "Auth pattern");
+    agent.on_domain_digest(digest).await.unwrap();
+    // entry_buffer stays empty (no connections returned)
+    assert!(agent.entry_buffer.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn cross_domain_farcaster_high_urgency_broadcasts_to_room() {
+    let (agent, messages, _, analyzer) = make_cross_domain_agent();
+    analyzer.queue_reactive(vec![
+        CrossDomainConnection {
+            from_domain: "engineering".to_string(),
+            to_domain: "data".to_string(),
+            connection_type: "architectural_impact".to_string(),
+            summary: "event schema change affects both domains".to_string(),
+            urgency: Urgency::High,
+        },
+    ], 50);
+
+    let digest = make_domain_digest("engineering", "Schema migration decision");
+    agent.on_domain_digest(digest).await.unwrap();
+
+    let msgs = messages.lock().await;
+    assert_eq!(msgs.len(), 1, "High urgency should broadcast to #farcaster-cross-domain");
+    assert!(msgs[0].0.as_str().contains("farcaster-cross-domain"));
+    assert!(msgs[0].1.contains("[cross-domain]"));
+    assert!(msgs[0].1.contains("event schema change affects both domains"));
+}
+
+#[tokio::test]
+async fn cross_domain_farcaster_low_urgency_skips_broadcast_but_records_entry() {
+    let (agent, messages, _, analyzer) = make_cross_domain_agent();
+    analyzer.queue_reactive(vec![
+        CrossDomainConnection {
+            from_domain: "engineering".to_string(),
+            to_domain: "infra".to_string(),
+            connection_type: "convergence_opportunity".to_string(),
+            summary: "might share CI infrastructure eventually".to_string(),
+            urgency: Urgency::Low,
+        },
+    ], 30);
+
+    let digest = make_domain_digest("engineering", "CI patterns emerging");
+    agent.on_domain_digest(digest).await.unwrap();
+
+    assert!(messages.lock().await.is_empty(), "Low urgency should not broadcast");
+    assert_eq!(agent.entry_buffer.lock().await.len(), 1);
+}
+
+// ─── CrossDomainFarcaster tick / digest path tests ────────────────────────────
+
+#[tokio::test]
+async fn cross_domain_farcaster_tick_empty_buffer_does_nothing() {
+    let (agent, _, governance_calls, _) = make_cross_domain_agent();
+    agent.tick().await.unwrap();
+    assert!(governance_calls.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn cross_domain_farcaster_tick_synthesizes_and_broadcasts() {
+    let (agent, messages, _, analyzer) = make_cross_domain_agent();
+
+    {
+        let mut buf = agent.entry_buffer.lock().await;
+        buf.push(CrossDomainEntry {
+            from_domain: "engineering".to_string(),
+            connection_summary: "shared auth approach".to_string(),
+            involved_domains: vec!["engineering".to_string(), "data".to_string()],
+            urgency: Urgency::Medium,
+            first_observed_at: chrono::Utc::now(),
+        });
+    }
+
+    analyzer.queue_digest(FarcasterDigestSynthesis {
+        connections: vec!["engineering and data converging on event sourcing".to_string()],
+        lessons: vec!["event sourcing should be org-wide default".to_string()],
+        open_questions: vec!["migration cost?".to_string()],
+        farga_verdict: "skip".to_string(),
+        farga_title: None,
+        farga_narrative: None,
+    }, 300);
+
+    agent.tick().await.unwrap();
+
+    let msgs = messages.lock().await;
+    assert_eq!(msgs.len(), 1);
+    assert!(msgs[0].0.as_str().contains("farcaster-cross-domain"));
+    assert!(msgs[0].1.contains("Cross-Domain Digest"));
+    assert!(msgs[0].1.contains("event sourcing should be org-wide default"));
+}
+
+#[tokio::test]
+async fn cross_domain_farcaster_tick_submits_to_farga_at_org_level() {
+    let (agent, _, governance_calls, analyzer) = make_cross_domain_agent();
+
+    {
+        let mut buf = agent.entry_buffer.lock().await;
+        buf.push(CrossDomainEntry {
+            from_domain: "engineering".to_string(),
+            connection_summary: "important cross-domain pattern".to_string(),
+            involved_domains: vec!["engineering".to_string(), "business".to_string()],
+            urgency: Urgency::High,
+            first_observed_at: chrono::Utc::now(),
+        });
+    }
+
+    analyzer.queue_digest(FarcasterDigestSynthesis {
+        connections: vec!["eng and business aligned on DDD".to_string()],
+        lessons: vec!["domain-driven design should be adopted org-wide".to_string()],
+        open_questions: vec![],
+        farga_verdict: "submit".to_string(),
+        farga_title: Some("DDD Org Adoption".to_string()),
+        farga_narrative: Some("Two domains independently converged on DDD boundaries.".to_string()),
+    }, 500);
+
+    agent.tick().await.unwrap();
+
+    let gcalls = governance_calls.lock().await;
+    assert_eq!(gcalls.len(), 1);
+    assert_eq!(gcalls[0].title, "DDD Org Adoption");
+    assert_eq!(gcalls[0].target_layer, FargaLayer::OrgLevel,
+        "cross-domain contributions must target OrgLevel");
+}
+
+// ─── FarcasterAgent upstream emission test ────────────────────────────────────
+
+fn make_agent_with_upstream(
+    projects: Vec<ProjectId>,
+    agent_ids: HashMap<ProjectId, UserId>,
+    upstream: Arc<dyn UpstreamObserver>,
+) -> (
+    charradissa_core::farcaster::FarcasterAgent,
+    Arc<MockFarcasterAnalyzer>,
+    Arc<tokio::sync::Mutex<Vec<GovernanceContribution>>>,
+) {
+    let (backend, _, _) = MockChatBackend::new();
+    let (farga, _, governance_calls, _) = MockFargaWriter::new();
+    let analyzer = Arc::new(MockFarcasterAnalyzer::new());
+    let agent = charradissa_core::farcaster::FarcasterAgent::new(
+        Arc::new(backend),
+        Arc::new(farga),
+        Arc::clone(&analyzer) as Arc<dyn charradissa_core::farcaster::FarcasterAnalyzer>,
+        projects,
+        agent_ids,
+    )
+    .with_domain("engineering".to_string())
+    .with_upstream(upstream);
+    (agent, analyzer, governance_calls)
+}
+
+#[tokio::test]
+async fn farcaster_agent_emits_domain_digest_upstream_after_tick() {
+    let (upstream, received) = MockUpstreamObserver::new();
+    let (agent, analyzer, _) = make_agent_with_upstream(
+        vec![ProjectId::new("api")],
+        HashMap::new(),
+        Arc::new(upstream),
+    );
+
+    {
+        let mut buf = agent.digest_buffer.lock().await;
+        buf.push(DigestEntry {
+            project_id: ProjectId::new("api"),
+            connection_summary: "shared auth approach".into(),
+            involved_projects: vec![ProjectId::new("api"), ProjectId::new("worker")],
+            concurrence: vec![],
+            urgency: Urgency::Medium,
+            whispered_at: None,
+            first_observed_at: chrono::Utc::now(),
+        });
+    }
+
+    analyzer.queue_digest(DigestSynthesis {
+        connections: vec!["api and worker share auth".into()],
+        lessons: vec!["centralize auth".into()],
+        open_questions: vec![],
+        farga_verdict: "skip".into(),
+        farga_title: Some("Auth Centralization".into()),
+        farga_narrative: None,
+    }, 200);
+
+    agent.tick().await.unwrap();
+
+    let evs = received.lock().await;
+    assert_eq!(evs.len(), 1, "upstream should receive exactly one DomainDigestEvent");
+    assert_eq!(evs[0].domain, "engineering");
+    assert_eq!(evs[0].title, "Auth Centralization");
+    assert!(evs[0].lessons.contains(&"centralize auth".to_string()));
+    assert!(evs[0].involved_projects.contains(&ProjectId::new("api")));
+    assert!(evs[0].farga_node_id.is_none(), "skip verdict should have no node_id");
+}
+
+#[tokio::test]
+async fn farcaster_agent_upstream_includes_node_id_on_submit() {
+    let (upstream, received) = MockUpstreamObserver::new();
+    let (agent, analyzer, _) = make_agent_with_upstream(
+        vec![ProjectId::new("api")],
+        HashMap::new(),
+        Arc::new(upstream),
+    );
+
+    {
+        let mut buf = agent.digest_buffer.lock().await;
+        buf.push(DigestEntry {
+            project_id: ProjectId::new("api"),
+            connection_summary: "important pattern".into(),
+            involved_projects: vec![ProjectId::new("api")],
+            concurrence: vec![],
+            urgency: Urgency::High,
+            whispered_at: None,
+            first_observed_at: chrono::Utc::now(),
+        });
+    }
+
+    analyzer.queue_digest(DigestSynthesis {
+        connections: vec!["pattern".into()],
+        lessons: vec!["lesson".into()],
+        open_questions: vec![],
+        farga_verdict: "submit".into(),
+        farga_title: Some("Engineering Pattern".into()),
+        farga_narrative: Some("Observed across projects.".into()),
+    }, 300);
+
+    agent.tick().await.unwrap();
+
+    let evs = received.lock().await;
+    assert_eq!(evs.len(), 1);
+    assert_eq!(evs[0].farga_node_id, Some("mock-node-id".to_string()),
+        "submit verdict should include the Farga node id");
 }

@@ -5,6 +5,7 @@ use tokio::time::interval;
 use crate::backend::ChatBackend;
 use crate::farga::{FargaWriter, Signal};
 use crate::farcaster::milestone::MilestoneEvent;
+use crate::farcaster::observation::ObservationEvent;
 use crate::farcaster::system_agent::SystemAgent;
 use crate::types::{ChatEvent, ProjectId, RoomId, UserId};
 
@@ -63,6 +64,16 @@ impl ConciergeAgent {
         for agent in &self.system_agents {
             if let Err(e) = agent.on_milestone(event).await {
                 tracing::error!("[{}] on_milestone error: {}", agent.name(), e);
+            }
+        }
+    }
+
+    /// Dispatch any observation event (project milestone or domain digest) to all system agents.
+    /// Use this instead of dispatch_milestone when Phase II fractal routing is needed.
+    pub async fn dispatch_observation(&self, event: &ObservationEvent) {
+        for agent in &self.system_agents {
+            if let Err(e) = agent.on_observation(event).await {
+                tracing::error!("[{}] on_observation error: {}", agent.name(), e);
             }
         }
     }
