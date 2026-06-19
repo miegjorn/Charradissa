@@ -12,7 +12,9 @@ use super::analyzer::{
     CrossSpaceSnapshot, DigestEntry, DigestSynthesis, FarcasterAnalyzer,
     ProjectSnapshot,
 };
+use amassada_core::governance::{GovernanceConfig, RiskTier};
 use super::governance::{GovernanceContribution, FargaLayer};
+use super::governance::evaluate_governance;
 use super::concurrence::{AgentConcurrence, ConcurrenceType, Urgency};
 use super::milestone::MilestoneEvent;
 use super::system_agent::SystemAgent;
@@ -221,7 +223,6 @@ impl FarcasterAgent {
                 .map(|e| e.first_observed_at)
                 .min()
                 .unwrap_or(period_start);
-            // Approximates last_observed: DigestEntry only tracks first_observed_at.
             let last_observed_at = entries.iter()
                 .map(|e| e.first_observed_at)
                 .max()
@@ -252,10 +253,36 @@ impl FarcasterAgent {
                 impact: None,
             };
 
-            if let Err(e) = self.farga.submit_governance_contribution(contribution).await {
-                tracing::error!("farcaster: governance submission failed, re-queuing: {}", e);
-                self.digest_buffer.lock().await.extend(entries);
-                return Ok(());
+            // Evaluate governance risk before submission
+            let gov_config = GovernanceConfig::default_weights();
+            let composition = evaluate_governance(&contribution, &gov_config);
+            tracing::info!(
+                "farcaster: governance assessment — tier={:?} primary_session={:?}",
+                composition.tier,
+                composition.primary_session,
+            );
+
+            let node_id = match self.farga.submit_governance_contribution(contribution).await {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::error!("farcaster: governance submission failed, re-queuing: {}", e);
+                    self.digest_buffer.lock().await.extend(entries);
+                    return Ok(());
+                }
+            };
+
+            // Broadcast alert for High/Critical tier
+            if matches!(composition.tier, RiskTier::High | RiskTier::Critical) {
+                let alert = format!(
+                    "**Governance Alert** [{:?}] — primary session: {} — node: {}",
+                    composition.tier,
+                    composition.primary_session.join(", "),
+                    node_id,
+                );
+                let farcaster_room = RoomId::new("#farcaster");
+                if let Err(e) = self.backend.send_message(&farcaster_room, &alert).await {
+                    tracing::warn!("farcaster: governance alert broadcast failed: {}", e);
+                }
             }
         }
 

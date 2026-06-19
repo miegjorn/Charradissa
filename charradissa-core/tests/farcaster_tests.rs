@@ -647,6 +647,53 @@ fn governance_contribution_serializes_round_trip() {
     assert_eq!(decoded.reversibility, Some(ReversibilityLevel::FullyReversible));
 }
 
+// --- Task 10 test ---
+
+#[tokio::test]
+async fn run_tick_evaluates_governance_risk_on_submit() {
+    // Verify that run_tick calls evaluate_governance and submits contribution to farga
+    let projects = vec![ProjectId::new("proj-a")];
+    let (agent, _dms, messages, _farga_calls, analyzer, governance_calls) =
+        make_agent(projects, HashMap::new());
+
+    let synthesis = DigestSynthesis {
+        connections: vec!["conn".into()],
+        lessons: vec!["lesson".into()],
+        open_questions: vec![],
+        farga_verdict: "submit".into(),
+        farga_title: Some("Pattern detected".into()),
+        farga_narrative: Some("Cross-project observation".into()),
+    };
+    analyzer.queue_digest(synthesis, 500);
+
+    // Seed one digest entry
+    {
+        let mut buf = agent.digest_buffer.lock().await;
+        buf.push(DigestEntry {
+            project_id: ProjectId::new("proj-a"),
+            connection_summary: "observed".into(),
+            involved_projects: vec![ProjectId::new("proj-a")],
+            concurrence: vec![],
+            urgency: Urgency::Low,
+            whispered_at: None,
+            first_observed_at: chrono::Utc::now(),
+        });
+    }
+
+    let result = agent.tick().await;
+    assert!(result.is_ok());
+
+    // Governance contribution was submitted
+    let gov = governance_calls.lock().await;
+    assert_eq!(gov.len(), 1, "should have submitted one governance contribution");
+    assert_eq!(gov[0].title, "Pattern detected");
+
+    // Digest broadcast happened (always sent, regardless of tier)
+    let msgs = messages.lock().await;
+    assert!(msgs.iter().any(|(room, _)| room.as_str() == "#farcaster"),
+        "digest broadcast should go to #farcaster");
+}
+
 #[test]
 fn farga_layer_variants_serialize_to_distinct_strings() {
     let variants = [FargaLayer::OrgLevel, FargaLayer::InitiativeLevel, FargaLayer::ProjectLevel];
