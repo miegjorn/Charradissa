@@ -13,7 +13,7 @@ use super::analyzer::{
     ProjectSnapshot,
 };
 use amassada_core::governance::{GovernanceConfig, RiskTier};
-use super::governance::{GovernanceContribution, FargaLayer};
+use super::governance::{GovernanceContribution, FargaLayer, ReversibilityLevel, ImpactScope};
 use super::governance::evaluate_governance;
 use super::concurrence::{AgentConcurrence, ConcurrenceType, Urgency};
 use super::milestone::MilestoneEvent;
@@ -262,6 +262,7 @@ impl FarcasterAgent {
                 composition.primary_session,
             );
 
+            let contribution_snapshot = contribution.clone();
             let node_id = match self.farga.submit_governance_contribution(contribution).await {
                 Ok(id) => id,
                 Err(e) => {
@@ -271,7 +272,7 @@ impl FarcasterAgent {
                 }
             };
 
-            // Broadcast alert for High/Critical tier
+            // Broadcast alert for High/Critical tier (pre-assessment, may be upgraded after)
             if matches!(composition.tier, RiskTier::High | RiskTier::Critical) {
                 let alert = format!(
                     "**Governance Alert** [{:?}] — primary session: {} — node: {}",
@@ -284,11 +285,85 @@ impl FarcasterAgent {
                     tracing::warn!("farcaster: governance alert broadcast failed: {}", e);
                 }
             }
+
+            // Spawn background task to re-evaluate once librarian fills in reversibility/impact
+            if !node_id.is_empty() {
+                let farga = Arc::clone(&self.farga);
+                let backend = Arc::clone(&self.backend);
+                tokio::spawn(poll_assessment_and_reevaluate(
+                    farga, backend, node_id, contribution_snapshot, gov_config,
+                ));
+            }
         }
 
         // 6. Update last_digest_at
         *self.last_digest_at.lock().await = Utc::now();
         Ok(())
+    }
+}
+
+async fn poll_assessment_and_reevaluate(
+    farga: Arc<dyn crate::farga::FargaWriter>,
+    backend: Arc<dyn crate::backend::ChatBackend>,
+    node_id: String,
+    mut contrib: GovernanceContribution,
+    config: GovernanceConfig,
+) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!("farcaster: assessment poll timed out for node {}", node_id);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        match farga.get_assessment(&node_id).await {
+            Ok(Some(ref assessment)) if assessment.status == "assessed" => {
+                contrib.reversibility = parse_reversibility(assessment.reversibility.as_deref());
+                contrib.impact = parse_impact(assessment.impact.as_deref());
+                let composition = evaluate_governance(&contrib, &config);
+                tracing::info!(
+                    "farcaster: re-assessed governance node {} — tier={:?}",
+                    node_id, composition.tier,
+                );
+                if matches!(composition.tier, RiskTier::High | RiskTier::Critical) {
+                    let alert = format!(
+                        "**Governance Re-Assessment** [{:?}] — primary session: {} — node: {} (librarian-enriched)",
+                        composition.tier,
+                        composition.primary_session.join(", "),
+                        node_id,
+                    );
+                    if let Err(e) = backend.send_message(&RoomId::new("#farcaster"), &alert).await {
+                        tracing::warn!("farcaster: re-assessment alert broadcast failed: {}", e);
+                    }
+                }
+                break;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("farcaster: poll_assessment error for node {}: {}", node_id, e);
+                break;
+            }
+        }
+    }
+}
+
+fn parse_reversibility(s: Option<&str>) -> Option<ReversibilityLevel> {
+    match s? {
+        "fully_reversible" | "FullyReversible" => Some(ReversibilityLevel::FullyReversible),
+        "effects_linger" | "EffectsLinger" => Some(ReversibilityLevel::EffectsLinger),
+        "costly_reversible" | "CostlyReversible" => Some(ReversibilityLevel::CostlyReversible),
+        "irreversible" | "Irreversible" => Some(ReversibilityLevel::Irreversible),
+        _ => None,
+    }
+}
+
+fn parse_impact(s: Option<&str>) -> Option<ImpactScope> {
+    match s? {
+        "contained" | "Contained" => Some(ImpactScope::Contained),
+        "cross_project" | "CrossProject" => Some(ImpactScope::CrossProject),
+        "domain_wide" | "DomainWide" => Some(ImpactScope::DomainWide),
+        "org_wide" | "OrgWide" => Some(ImpactScope::OrgWide),
+        _ => None,
     }
 }
 

@@ -39,6 +39,13 @@ pub struct GovernanceDecision {
     pub rationale: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssessmentResult {
+    pub status: String,
+    pub reversibility: Option<String>,
+    pub impact: Option<String>,
+}
+
 #[async_trait]
 pub trait FargaWriter: Send + Sync {
     async fn write_signals(&self, project: &ProjectId, signals: Vec<Signal>) -> Result<()>;
@@ -60,6 +67,9 @@ pub trait FargaWriter: Send + Sync {
         Ok(String::new())
     }
     async fn submit_governance_decision(&self, decision: GovernanceDecision) -> Result<()>;
+    async fn get_assessment(&self, _node_id: &str) -> Result<Option<AssessmentResult>> {
+        Ok(None)
+    }
 }
 
 pub struct HttpFargaWriter {
@@ -128,5 +138,21 @@ impl FargaWriter for HttpFargaWriter {
             .error_for_status()
             .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))?;
         Ok(())
+    }
+
+    async fn get_assessment(&self, node_id: &str) -> Result<Option<AssessmentResult>> {
+        let url = format!("{}/governance/assessments/{}", self.base_url, node_id);
+        let resp = self.client.get(&url).send().await
+            .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))?;
+        if resp.status().as_u16() == 404 { return Ok(None); }
+        resp.error_for_status_ref()
+            .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))?;
+        let json: serde_json::Value = resp.json().await
+            .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))?;
+        Ok(Some(AssessmentResult {
+            status: json["status"].as_str().unwrap_or("pending").to_string(),
+            reversibility: json["reversibility"].as_str().map(|s| s.to_string()),
+            impact: json["impact"].as_str().map(|s| s.to_string()),
+        }))
     }
 }
