@@ -58,13 +58,25 @@ impl ChatBackend for MockChatBackend {
 struct MockFargaWriter {
     calls: Arc<tokio::sync::Mutex<Vec<(ProjectId, Vec<Signal>)>>>,
     governance_calls: Arc<tokio::sync::Mutex<Vec<GovernanceContribution>>>,
+    decision_calls: Arc<tokio::sync::Mutex<Vec<charradissa_core::farga::GovernanceDecision>>>,
 }
 
 impl MockFargaWriter {
-    fn new() -> (Self, Arc<tokio::sync::Mutex<Vec<(ProjectId, Vec<Signal>)>>>, Arc<tokio::sync::Mutex<Vec<GovernanceContribution>>>) {
+    fn new() -> (
+        Self,
+        Arc<tokio::sync::Mutex<Vec<(ProjectId, Vec<Signal>)>>>,
+        Arc<tokio::sync::Mutex<Vec<GovernanceContribution>>>,
+        Arc<tokio::sync::Mutex<Vec<charradissa_core::farga::GovernanceDecision>>>,
+    ) {
         let calls = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let governance_calls = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        (Self { calls: Arc::clone(&calls), governance_calls: Arc::clone(&governance_calls) }, calls, governance_calls)
+        let decision_calls = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        (
+            Self { calls: Arc::clone(&calls), governance_calls: Arc::clone(&governance_calls), decision_calls: Arc::clone(&decision_calls) },
+            calls,
+            governance_calls,
+            decision_calls,
+        )
     }
 }
 
@@ -80,8 +92,15 @@ impl FargaWriter for MockFargaWriter {
     async fn submit_governance_contribution(
         &self,
         contribution: GovernanceContribution,
-    ) -> charradissa_core::error::Result<()> {
+    ) -> charradissa_core::error::Result<String> {
         self.governance_calls.lock().await.push(contribution);
+        Ok("mock-node-id".to_string())
+    }
+    async fn submit_governance_decision(
+        &self,
+        decision: charradissa_core::farga::GovernanceDecision,
+    ) -> charradissa_core::error::Result<()> {
+        self.decision_calls.lock().await.push(decision);
         Ok(())
     }
 }
@@ -131,7 +150,7 @@ fn make_agent(projects: Vec<ProjectId>, agent_ids: HashMap<ProjectId, UserId>)
         Arc<tokio::sync::Mutex<Vec<GovernanceContribution>>>)
 {
     let (backend, dms, messages) = MockChatBackend::new();
-    let (farga, farga_calls, governance_calls) = MockFargaWriter::new();
+    let (farga, farga_calls, governance_calls, _decision_calls) = MockFargaWriter::new();
     let analyzer = Arc::new(MockFarcasterAnalyzer::new());
     let agent = FarcasterAgent::new(
         Arc::new(backend),
@@ -400,6 +419,9 @@ async fn tick_requeues_entries_on_farga_failure() {
             Err(CharradissaError::Backend("simulated failure".into()))
         }
         async fn recent_signals(&self, _: &ProjectId, _: chrono::Duration) -> Result<Vec<Signal>> { Ok(vec![]) }
+        async fn submit_governance_decision(&self, _: charradissa_core::farga::GovernanceDecision) -> Result<()> {
+            Ok(())
+        }
     }
 
     let (backend, _, _) = MockChatBackend::new();

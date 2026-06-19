@@ -78,6 +78,7 @@ async fn dispatch_milestone_fans_out_to_all_agents() {
     impl FargaWriter for StubFarga {
         async fn write_signals(&self, _: &charradissa_core::types::ProjectId, _: Vec<charradissa_core::farga::Signal>) -> Result<()> { Ok(()) }
         async fn recent_signals(&self, _: &charradissa_core::types::ProjectId, _: chrono::Duration) -> Result<Vec<charradissa_core::farga::Signal>> { Ok(vec![]) }
+        async fn submit_governance_decision(&self, _: charradissa_core::farga::GovernanceDecision) -> Result<()> { Ok(()) }
     }
 
     let calls_a = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));

@@ -13,6 +13,32 @@ pub struct Signal {
     pub source: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum GovernanceOutcome {
+    Approved,
+    Rejected,
+    Deferred,
+    ApprovedWithConditions,
+}
+
+impl GovernanceOutcome {
+    pub fn as_status_str(&self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+            Self::Deferred => "deferred",
+            Self::ApprovedWithConditions => "approved_with_conditions",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovernanceDecision {
+    pub node_id: String,
+    pub outcome: GovernanceOutcome,
+    pub rationale: String,
+}
+
 #[async_trait]
 pub trait FargaWriter: Send + Sync {
     async fn write_signals(&self, project: &ProjectId, signals: Vec<Signal>) -> Result<()>;
@@ -22,7 +48,7 @@ pub trait FargaWriter: Send + Sync {
     async fn submit_governance_contribution(
         &self,
         contribution: GovernanceContribution,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let content = serde_json::to_string(&contribution)
             .map_err(|e| crate::error::CharradissaError::Dispatch(e.to_string()))?;
         let signal = Signal {
@@ -30,8 +56,10 @@ pub trait FargaWriter: Send + Sync {
             content,
             source: "farcaster-governance".to_string(),
         };
-        self.write_signals(&ProjectId::new("system"), vec![signal]).await
+        self.write_signals(&ProjectId::new("system"), vec![signal]).await?;
+        Ok(String::new())
     }
+    async fn submit_governance_decision(&self, decision: GovernanceDecision) -> Result<()>;
 }
 
 pub struct HttpFargaWriter {
@@ -70,11 +98,30 @@ impl FargaWriter for HttpFargaWriter {
     async fn submit_governance_contribution(
         &self,
         contribution: GovernanceContribution,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let url = format!("{}/governance", self.base_url);
-        self.client
+        let resp = self.client
             .post(&url)
             .json(&contribution)
+            .send()
+            .await
+            .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))?
+            .error_for_status()
+            .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))?;
+        let json: serde_json::Value = resp.json().await
+            .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))?;
+        Ok(json["id"].as_str().unwrap_or("").to_string())
+    }
+
+    async fn submit_governance_decision(&self, decision: GovernanceDecision) -> Result<()> {
+        let url = format!("{}/governance/decisions", self.base_url);
+        self.client
+            .post(&url)
+            .json(&serde_json::json!({
+                "node_id": decision.node_id,
+                "outcome": decision.outcome.as_status_str(),
+                "rationale": decision.rationale,
+            }))
             .send()
             .await
             .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))?
