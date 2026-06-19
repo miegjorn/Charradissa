@@ -666,3 +666,110 @@ fn all_reversibility_and_impact_variants_serialize() {
         .collect();
     assert_eq!(unique_imp.len(), 4);
 }
+
+// --- derive_risk_factors / evaluate_governance tests ---
+
+use charradissa_core::farcaster::governance::{derive_risk_factors, evaluate_governance};
+use amassada_core::governance::{GovernanceConfig, RiskTier};
+
+fn make_minimal_contribution() -> GovernanceContribution {
+    GovernanceContribution {
+        title: "test".into(),
+        narrative: "test narrative".into(),
+        lessons: vec![],
+        open_questions: vec![],
+        involved_projects: vec![ProjectId::new("proj-a")],
+        concurrence: vec![],
+        target_layer: FargaLayer::ProjectLevel,
+        first_observed_at: chrono::Utc::now(),
+        last_observed_at: chrono::Utc::now(),
+        event_count: 1,
+        reversibility: None,
+        impact: None,
+    }
+}
+
+#[test]
+fn derive_risk_factors_project_level_has_low_proximity() {
+    let contrib = make_minimal_contribution();
+    let factors = derive_risk_factors(&contrib);
+    assert!(factors.primitive_proximity < 0.5);
+}
+
+#[test]
+fn derive_risk_factors_org_level_has_high_proximity() {
+    let mut contrib = make_minimal_contribution();
+    contrib.target_layer = FargaLayer::OrgLevel;
+    let factors = derive_risk_factors(&contrib);
+    assert!(factors.primitive_proximity > 0.9);
+}
+
+#[test]
+fn derive_risk_factors_irreversible_sets_flag() {
+    let mut contrib = make_minimal_contribution();
+    contrib.reversibility = Some(ReversibilityLevel::Irreversible);
+    let factors = derive_risk_factors(&contrib);
+    assert!(factors.is_irreversible);
+    assert_eq!(factors.reversibility, 1.0);
+}
+
+#[test]
+fn derive_risk_factors_org_wide_sets_flag() {
+    let mut contrib = make_minimal_contribution();
+    contrib.impact = Some(ImpactScope::OrgWide);
+    let factors = derive_risk_factors(&contrib);
+    assert!(factors.is_org_wide);
+    assert_eq!(factors.impact, 1.0);
+}
+
+#[test]
+fn derive_risk_factors_none_reversibility_is_zero() {
+    let contrib = make_minimal_contribution();
+    let factors = derive_risk_factors(&contrib);
+    assert_eq!(factors.reversibility, 0.0);
+    assert!(!factors.is_irreversible);
+}
+
+#[test]
+fn derive_risk_factors_concurrence_caps_at_one() {
+    let mut contrib = make_minimal_contribution();
+    for i in 0..5 {
+        contrib.concurrence.push(AgentConcurrence {
+            project_id: format!("p{}", i),
+            agent_address: format!("a{}", i),
+            concurrence_type: ConcurrenceType::Whispered,
+            note: None,
+        });
+    }
+    let factors = derive_risk_factors(&contrib);
+    assert!(factors.signal_concurrence <= 1.0);
+}
+
+#[test]
+fn evaluate_governance_returns_session_composition() {
+    let contrib = make_minimal_contribution();
+    let config = GovernanceConfig::default_weights();
+    let composition = evaluate_governance(&contrib, &config);
+    assert!(matches!(composition.tier, RiskTier::Low | RiskTier::Medium | RiskTier::High | RiskTier::Critical));
+    assert!(!composition.primary_session.is_empty());
+}
+
+#[test]
+fn evaluate_governance_org_wide_irreversible_is_critical() {
+    let mut contrib = make_minimal_contribution();
+    contrib.target_layer = FargaLayer::OrgLevel;
+    contrib.impact = Some(ImpactScope::OrgWide);
+    contrib.reversibility = Some(ReversibilityLevel::Irreversible);
+    contrib.event_count = 10;
+    for i in 0..2 {
+        contrib.concurrence.push(AgentConcurrence {
+            project_id: format!("p{}", i),
+            agent_address: format!("a{}", i),
+            concurrence_type: ConcurrenceType::Whispered,
+            note: None,
+        });
+    }
+    let config = GovernanceConfig::default_weights();
+    let composition = evaluate_governance(&contrib, &config);
+    assert_eq!(composition.tier, RiskTier::Critical);
+}

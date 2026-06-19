@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use crate::types::ProjectId;
 use super::concurrence::AgentConcurrence;
+use amassada_core::governance::{RiskFactors, GovernanceConfig, SessionComposition, compute_risk_score, compose_session};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FargaLayer {
@@ -42,4 +43,50 @@ pub struct GovernanceContribution {
     pub reversibility: Option<ReversibilityLevel>,
     /// Set to None at submission — filled by Farga librarian assessment (Plan 2)
     pub impact: Option<ImpactScope>,
+}
+
+pub fn derive_risk_factors(contrib: &GovernanceContribution) -> RiskFactors {
+    let primitive_proximity = match contrib.target_layer {
+        FargaLayer::OrgLevel => 1.0,
+        FargaLayer::InitiativeLevel => 0.6,
+        FargaLayer::ProjectLevel => 0.3,
+    };
+
+    let signal_concurrence = (contrib.concurrence.len() as f32 / 4.0).min(1.0);
+    let signal_velocity = (contrib.event_count as f32 / 10.0).min(1.0);
+
+    let reversibility = match &contrib.reversibility {
+        None | Some(ReversibilityLevel::FullyReversible) => 0.0,
+        Some(ReversibilityLevel::EffectsLinger) => 0.3,
+        Some(ReversibilityLevel::CostlyReversible) => 0.6,
+        Some(ReversibilityLevel::Irreversible) => 1.0,
+    };
+
+    let impact = match &contrib.impact {
+        None | Some(ImpactScope::Contained) => 0.0,
+        Some(ImpactScope::CrossProject) => 0.3,
+        Some(ImpactScope::DomainWide) => 0.6,
+        Some(ImpactScope::OrgWide) => 1.0,
+    };
+
+    RiskFactors {
+        primitive_proximity,
+        signal_concurrence,
+        signal_velocity,
+        reversibility,
+        impact,
+        precedent: 0.0,
+        is_irreversible: contrib.reversibility == Some(ReversibilityLevel::Irreversible),
+        is_org_wide: contrib.impact == Some(ImpactScope::OrgWide),
+    }
+}
+
+pub fn evaluate_governance(
+    contrib: &GovernanceContribution,
+    config: &GovernanceConfig,
+) -> SessionComposition {
+    let factors = derive_risk_factors(contrib);
+    let risk_score = compute_risk_score(&factors, &config.risk_weights, &config.tier_thresholds);
+    let projects: Vec<String> = contrib.involved_projects.iter().map(|p| p.to_string()).collect();
+    compose_session(&risk_score, &projects, config)
 }

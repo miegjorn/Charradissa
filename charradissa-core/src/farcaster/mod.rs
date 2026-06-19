@@ -15,4 +15,4 @@ pub use analyzer::{
 pub use system_agent::SystemAgent;
 pub use agent::FarcasterAgent;
 pub use claude_analyzer::ClaudeFarcasterAnalyzer;
-pub use governance::{GovernanceContribution, FargaLayer, ReversibilityLevel, ImpactScope};
+pub use governance::{GovernanceContribution, FargaLayer, ReversibilityLevel, ImpactScope, derive_risk_factors, evaluate_governance};
