@@ -7,12 +7,16 @@ use tokio::sync::Mutex;
 use crate::backend::ChatBackend;
 use crate::error::Result;
 use crate::farga::FargaWriter;
-use crate::types::{ProjectId, RoomId, UserId};
+use crate::transport::CharradissaTransport;
+use crate::types::{ProjectId, RoomId, RoomOptions, UserId};
+use amassada_core::canvas::Canvas;
+use amassada_core::governance::{compose_governance_canvas, GovernanceConfig, RiskTier};
+use amassada_core::session::SessionEngine;
 use super::analyzer::{
     CrossSpaceSnapshot, DigestEntry, DigestSynthesis, FarcasterAnalyzer,
     ProjectSnapshot,
 };
-use amassada_core::governance::{GovernanceConfig, RiskTier};
+// GovernanceConfig and RiskTier re-imported via the governance module block above
 use super::governance::{GovernanceContribution, FargaLayer, ReversibilityLevel, ImpactScope};
 use super::governance::evaluate_governance;
 use super::concurrence::{AgentConcurrence, ConcurrenceType, Urgency};
@@ -335,6 +339,12 @@ async fn poll_assessment_and_reevaluate(
                     if let Err(e) = backend.send_message(&RoomId::new("#farcaster"), &alert).await {
                         tracing::warn!("farcaster: re-assessment alert broadcast failed: {}", e);
                     }
+                    let goal = format!("[governance] {}", contrib.title);
+                    let backend2 = Arc::clone(&backend);
+                    let node_id2 = node_id.clone();
+                    tokio::spawn(async move {
+                        spin_up_governance_session(backend2, composition, goal, node_id2).await;
+                    });
                 }
                 break;
             }
@@ -364,6 +374,99 @@ fn parse_impact(s: Option<&str>) -> Option<ImpactScope> {
         "domain_wide" | "DomainWide" => Some(ImpactScope::DomainWide),
         "org_wide" | "OrgWide" => Some(ImpactScope::OrgWide),
         _ => None,
+    }
+}
+
+const GOVERNANCE_CANVAS_YAML: &str = r#"
+id: governance-deliberation
+version: "1.0.0"
+mode: auto
+selector:
+  description: "Governance deliberation on a proposed Fondament archetype change"
+  tags: [governance, archetype, fondament, risk, deliberation]
+  examples: []
+initial_participants:
+  - persona: moderator
+    domain: stances/moderator
+  - persona: adversarial
+    domain: stances/adversarial
+  - persona: realist
+    domain: stances/realist
+  - persona: builder
+    domain: stances/builder
+budget:
+  total_tokens: 15000
+  pools:
+    main_session: 11000
+    consultations: 3000
+    mod_whisper: 1000
+consultation:
+  max_turns: 2
+  min_response_tokens: 50
+rounds:
+  min: 3
+  max: 6
+  convergence_modifier: 0.7
+  context_window: 20
+human:
+  slot: true
+  advisory_window_turns: 2
+output:
+  format: markdown
+  sections:
+    - id: proposed_change
+      title: "Proposed Archetype Change"
+      required: true
+    - id: risk_assessment
+      title: "Risk Assessment"
+      required: true
+    - id: agent_votes
+      title: "Agent Votes"
+      required: true
+    - id: recommendation
+      title: "Recommendation"
+      required: true
+"#;
+
+async fn spin_up_governance_session(
+    backend: Arc<dyn ChatBackend>,
+    composition: amassada_core::governance::SessionComposition,
+    goal: String,
+    node_id: String,
+) {
+    let base_canvas = match Canvas::from_yaml(GOVERNANCE_CANVAS_YAML) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("governance canvas parse failed: {}", e);
+            return;
+        }
+    };
+
+    let canvas = compose_governance_canvas(base_canvas, &composition);
+
+    let room_alias = format!("#governance-{}", node_id);
+    let room = match backend.create_room(&RoomOptions {
+        alias: room_alias.clone(),
+        name: format!("Governance: {}", goal),
+        topic: Some(format!("node_id={}", node_id)),
+        invite: vec![],
+    }).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("governance room creation failed for node {}: {}", node_id, e);
+            return;
+        }
+    };
+
+    let transport = std::sync::Arc::new(CharradissaTransport::new(room.clone(), backend));
+    let engine = SessionEngine::new(canvas, goal, transport);
+    tracing::info!("governance session starting in {} for node {}", room, node_id);
+    match engine.run().await {
+        Ok(output) => tracing::info!(
+            "governance session completed for node {} — {} artifacts",
+            node_id, output.artifacts.len()
+        ),
+        Err(e) => tracing::error!("governance session failed for node {}: {}", node_id, e),
     }
 }
 
