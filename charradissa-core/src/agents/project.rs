@@ -1,8 +1,21 @@
 use std::sync::Arc;
+use amassada_core::canvas::Canvas;
+use amassada_core::canvas_library;
+use amassada_core::error::AmassadaError;
+use amassada_core::mission::engine::MissionEngine;
+use amassada_core::mission::evaluator::ClaudeEvaluator;
+use amassada_core::mission::meta::ClaudeMetaModerator;
+use amassada_core::mission::session_runner::DefaultSessionRunner;
+use amassada_core::mission::types::{FargaVerdict, SubObjective, SubObjectiveStatus};
+use amassada_core::session::SessionEngine;
+use amassada_core::transport::Transport;
 use crate::approval::{ApprovalOutcome, ApprovalQueue};
 use crate::backend::ChatBackend;
+use crate::error::CharradissaError;
+use crate::farga::{FargaWriter, MissionContribution};
 use crate::task::TaskManager;
 use crate::tool_loop::{parse_slash_command, SlashCommand};
+use crate::transport::CharradissaTransport;
 use crate::types::*;
 
 pub struct ProjectAgent {
@@ -13,6 +26,7 @@ pub struct ProjectAgent {
     backend: Arc<dyn ChatBackend>,
     task_manager: Arc<dyn TaskManager>,
     approval_queue: Arc<tokio::sync::Mutex<ApprovalQueue>>,
+    farga_writer: Option<Arc<dyn FargaWriter>>,
 }
 
 impl ProjectAgent {
@@ -24,8 +38,9 @@ impl ProjectAgent {
         backend: Arc<dyn ChatBackend>,
         task_manager: Arc<dyn TaskManager>,
         approval_queue: Arc<tokio::sync::Mutex<ApprovalQueue>>,
+        farga_writer: Option<Arc<dyn FargaWriter>>,
     ) -> Self {
-        Self { project, user_id, main_room, space, backend, task_manager, approval_queue }
+        Self { project, user_id, main_room, space, backend, task_manager, approval_queue, farga_writer }
     }
 
     pub async fn handle_event(&self, event: &ChatEvent) -> crate::error::Result<()> {
@@ -56,8 +71,10 @@ impl ProjectAgent {
     async fn handle_slash_command(&self, cmd: SlashCommand, _from: &UserId) -> crate::error::Result<()> {
         match cmd {
             SlashCommand::Session { canvas_id, goal } => {
-                tracing::info!("project {}: session requested — canvas={} goal={}",
-                    self.project, canvas_id, goal);
+                self.run_session(canvas_id, goal).await?;
+            }
+            SlashCommand::Mission { goal, budget_tokens } => {
+                self.run_mission(goal, budget_tokens).await?;
             }
             SlashCommand::Invite { address } => {
                 let addr = CompositionAddress::Role { role: address, stance_override: None };
@@ -66,6 +83,98 @@ impl ProjectAgent {
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    /// Runs a single `SessionEngine` with the given canvas and goal.
+    async fn run_session(&self, canvas_id: String, goal: String) -> crate::error::Result<()> {
+        tracing::info!("project {}: starting session — canvas={} goal={}", self.project, canvas_id, goal);
+
+        let canvases = canvas_library::stdlib();
+        let canvas = canvases.get(&canvas_id)
+            .cloned()
+            .unwrap_or_else(|| {
+                tracing::warn!("canvas '{}' not found in stdlib, falling back to design-session", canvas_id);
+                canvases["design-session"].clone()
+            });
+
+        let transport = Arc::new(CharradissaTransport::new(
+            self.main_room.clone(),
+            Arc::clone(&self.backend),
+        ));
+
+        let output = SessionEngine::new(canvas, goal, transport as Arc<dyn Transport>)
+            .run()
+            .await
+            .map_err(|e| CharradissaError::Dispatch(e.to_string()))?;
+
+        tracing::info!("project {}: session complete — {} artifacts, {} tokens",
+            self.project, output.artifacts.len(), output.total_tokens);
+
+        Ok(())
+    }
+
+    /// Runs a `MissionEngine` with the given goal and budget, submitting to Farga if warranted.
+    async fn run_mission(&self, goal: String, budget_tokens: u64) -> crate::error::Result<()> {
+        tracing::info!("project {}: starting mission — goal={} budget={}", self.project, goal, budget_tokens);
+
+        let transport = Arc::new(CharradissaTransport::new(
+            self.main_room.clone(),
+            Arc::clone(&self.backend),
+        ));
+
+        let runner = Box::new(DefaultSessionRunner::new(transport as Arc<dyn Transport>));
+        let evaluator = Box::new(ClaudeEvaluator::default());
+        let meta = Box::new(ClaudeMetaModerator::default());
+
+        let sub_objectives = vec![SubObjective {
+            id: "main".into(),
+            description: goal.clone(),
+            completion_condition: format!("The goal is accomplished: {}", goal),
+            status: SubObjectiveStatus::Pending,
+            output: None,
+            last_eval_reason: None,
+        }];
+
+        let mut engine = MissionEngine::new(
+            goal.clone(),
+            format!("The overall mission goal is accomplished: {}", goal),
+            sub_objectives,
+            budget_tokens,
+            runner,
+            evaluator,
+            meta,
+        );
+
+        let canvases = canvas_library::stdlib();
+        let outcome = engine.run(move |id: &str| canvases.get(id).cloned())
+            .await
+            .map_err(|e| CharradissaError::Dispatch(e.to_string()))?;
+
+        tracing::info!("project {}: mission complete — exhausted={} completed={:?}",
+            self.project, outcome.exhausted, outcome.completed_sub_objective_ids);
+
+        if let FargaVerdict::Submit { ref contribution } = outcome.verdict {
+            if let Some(ref writer) = self.farga_writer {
+                let mc = MissionContribution {
+                    mission_id: outcome.mission_id.clone(),
+                    title: contribution.title.clone(),
+                    narrative: contribution.narrative.clone(),
+                    goal: goal.clone(),
+                    sessions_run: outcome.metadata.sessions_run,
+                    total_tokens_spent: outcome.metadata.total_tokens_spent,
+                    duration_secs: outcome.metadata.duration_secs,
+                };
+                match writer.submit_mission_contribution(mc).await {
+                    Ok(id) => tracing::info!("mission contribution submitted to Farga — id={}", id),
+                    Err(e) => tracing::warn!("Farga submission failed: {}", e),
+                }
+            } else {
+                tracing::info!("no Farga writer configured — skipping submission for mission {}",
+                    outcome.mission_id);
+            }
+        }
+
         Ok(())
     }
 

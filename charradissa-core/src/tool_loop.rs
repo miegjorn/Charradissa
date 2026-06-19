@@ -10,9 +10,14 @@ pub enum SlashCommand {
     Approve { id: String },
     Reject { id: String, reason: String },
     Session { canvas_id: String, goal: String },
+    /// `/mission <budget_tokens> <goal>` — triggers a full MissionEngine run.
+    /// budget_tokens is the total token budget (e.g. 100000).
+    Mission { goal: String, budget_tokens: u64 },
     Invite { address: String },
     Call,
 }
+
+const DEFAULT_MISSION_BUDGET: u64 = 100_000;
 
 pub fn parse_slash_command(text: &str) -> Option<SlashCommand> {
     let text = text.trim();
@@ -35,6 +40,28 @@ pub fn parse_slash_command(text: &str) -> Option<SlashCommand> {
                 .map(|s| s.trim_matches('"').to_string())
                 .unwrap_or_else(|| "unspecified goal".into());
             Some(SlashCommand::Session { canvas_id, goal })
+        }
+        "mission" => {
+            // Try to parse first arg as a budget number; if not, treat entire rest as goal.
+            match parts.get(1) {
+                None => None,
+                Some(first) => {
+                    let (budget_tokens, goal) = if let Ok(n) = first.parse::<u64>() {
+                        let g = parts.get(2)
+                            .map(|s| s.trim_matches('"').to_string())
+                            .unwrap_or_else(|| "unspecified goal".into());
+                        (n, g)
+                    } else {
+                        // No budget arg — first token is part of the goal
+                        let goal_parts: Vec<&str> = text[1..].splitn(2, ' ').collect();
+                        let g = goal_parts.get(1)
+                            .map(|s| s.trim_matches('"').to_string())
+                            .unwrap_or_else(|| first.to_string());
+                        (DEFAULT_MISSION_BUDGET, g)
+                    };
+                    Some(SlashCommand::Mission { goal, budget_tokens })
+                }
+            }
         }
         "invite" => {
             let address = parts.get(1)?.to_string();

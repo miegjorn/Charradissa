@@ -5,6 +5,7 @@ use amassada_core::error::Result as AmassadaResult;
 use amassada_core::error::AmassadaError;
 use amassada_core::transport::Transport;
 use amassada_core::types::{AgentId, HumanInput, SessionEvent, SessionOutput, WhisperMsg};
+use amassada_core::dispatch;
 use crate::backend::ChatBackend;
 use crate::types::RoomId;
 
@@ -55,9 +56,29 @@ impl Transport for CharradissaTransport {
     }
 
     async fn consult(&self, req: &ConsultRequest) -> AmassadaResult<ConsultResponse> {
+        // Parse persona from agent_id (e.g. "builder-1" → "builder")
+        let persona = req.target.to_string();
+        let persona_hint = persona.split('-').next().unwrap_or("specialist");
+
+        let system = format!(
+            "You are {} — a specialist agent. \
+             Answer the following question concisely and with practical, expert-level insight. \
+             Respond only with the answer, no preamble.",
+            persona_hint
+        );
+
+        let resp = dispatch::dispatch(dispatch::TurnRequest {
+            system_prompt: system,
+            context: req.question.clone(),
+            model: "claude-haiku-4-5-20251001".to_string(),
+            max_tokens: 1024,
+            thinking_budget: None,
+            api_key: None,
+        }).await.map_err(|e| AmassadaError::Transport(e.to_string()))?;
+
         Ok(ConsultResponse {
             from: req.target.clone(),
-            content: "[consultation pending full Matrix ConsultRuntime]".into(),
+            content: resp.text,
         })
     }
 

@@ -1,4 +1,3 @@
-// placeholder — filled in Task 3
 use async_trait::async_trait;
 use chrono::Duration;
 use serde::{Deserialize, Serialize};
@@ -46,6 +45,18 @@ pub struct AssessmentResult {
     pub impact: Option<String>,
 }
 
+/// Mission outcome sent to Farga after a `MissionEngine` run with `FargaVerdict::Submit`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissionContribution {
+    pub mission_id: String,
+    pub title: String,
+    pub narrative: String,
+    pub goal: String,
+    pub sessions_run: u32,
+    pub total_tokens_spent: u64,
+    pub duration_secs: u64,
+}
+
 #[async_trait]
 pub trait FargaWriter: Send + Sync {
     async fn write_signals(&self, project: &ProjectId, signals: Vec<Signal>) -> Result<()>;
@@ -69,6 +80,18 @@ pub trait FargaWriter: Send + Sync {
     async fn submit_governance_decision(&self, decision: GovernanceDecision) -> Result<()>;
     async fn get_assessment(&self, _node_id: &str) -> Result<Option<AssessmentResult>> {
         Ok(None)
+    }
+    /// Default: serialise as a signal. HTTP backends override to POST to /contributions/mission.
+    async fn submit_mission_contribution(&self, contribution: MissionContribution) -> Result<String> {
+        let content = serde_json::to_string(&contribution)
+            .map_err(|e| crate::error::CharradissaError::Dispatch(e.to_string()))?;
+        let signal = Signal {
+            project: "system".to_string(),
+            content,
+            source: "mission-engine".to_string(),
+        };
+        self.write_signals(&ProjectId::new("system"), vec![signal]).await?;
+        Ok(String::new())
     }
 }
 
@@ -154,5 +177,20 @@ impl FargaWriter for HttpFargaWriter {
             reversibility: json["reversibility"].as_str().map(|s| s.to_string()),
             impact: json["impact"].as_str().map(|s| s.to_string()),
         }))
+    }
+
+    async fn submit_mission_contribution(&self, contribution: MissionContribution) -> Result<String> {
+        let url = format!("{}/contributions/mission", self.base_url);
+        let resp = self.client
+            .post(&url)
+            .json(&contribution)
+            .send()
+            .await
+            .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))?
+            .error_for_status()
+            .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))?;
+        let json: serde_json::Value = resp.json().await
+            .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))?;
+        Ok(json["id"].as_str().unwrap_or("").to_string())
     }
 }

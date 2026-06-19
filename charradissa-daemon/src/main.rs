@@ -1,4 +1,5 @@
 mod registry;
+mod queue_api;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,6 +13,7 @@ use charradissa_core::farga::HttpFargaWriter;
 use charradissa_matrix::backend::MatrixBackend;
 use charradissa_matrix::appservice::AppserviceState;
 use axum::{routing::put, Router};
+use charradissa_core::approval::PersistentApprovalQueue;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -90,13 +92,19 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("charradissa-daemon starting for org: {}", config.org.name);
 
+    let queue_file = std::env::var("CHARRADISSA_QUEUE_FILE")
+        .unwrap_or_else(|_| "charradissa-queue.json".into());
+    let persistent_queue = Arc::new(PersistentApprovalQueue::new(queue_file.into()));
+    let queue_state = queue_api::QueueState { queue: Arc::clone(&persistent_queue) };
+
     let appservice_port = std::env::var("CHARRADISSA_PORT").unwrap_or("8448".into());
     let appservice_state = AppserviceState { hs_token: as_token };
 
     let app = Router::new()
         .route("/_matrix/app/v1/transactions/:txnId",
             put(charradissa_matrix::appservice::handle_transaction))
-        .with_state(appservice_state);
+        .with_state(appservice_state)
+        .merge(queue_api::router(queue_state));
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", appservice_port)).await?;
     tracing::info!("charradissa-daemon webhook listening on :{}", appservice_port);
