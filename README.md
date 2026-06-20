@@ -324,6 +324,8 @@ All fields have documented defaults; the only required fields are `org.name`, `o
 
 Charradissa uses the Matrix Appservice protocol. No per-bot WebSocket connections. All inbound events arrive as a single `PUT` webhook; all outbound calls use `Authorization: Bearer <as_token>`.
 
+The appservice is fully wired in the local kind cluster: charradissa runs at `1/1`, `@charradissa` and `@claude` users exist in Matrix, and the registration file lives in Synapse's `/data` directory. What follows is the reference setup for re-provisioning or new deployments.
+
 ### Registration YAML (register with your homeserver)
 
 ```yaml
@@ -411,6 +413,9 @@ docker build --build-context amassada=./Amassada \
 For local kind deployment, load it in afterwards:
 `kind load docker-image ghcr.io/occitan/charradissa:latest --name occitan`.
 See `Caissa/docs/install.md` (step 3e) for the full stack.
+
+> **Prompt caching**: `responder.rs` sends Anthropic prompt-cache headers on Guilhem Matrix
+> replies, reducing cost on repeated system-prompt content.
 
 ### Run
 
