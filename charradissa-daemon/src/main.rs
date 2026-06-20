@@ -121,6 +121,9 @@ async fn main() -> anyhow::Result<()> {
         .with_state(appservice_state)
         .merge(queue_api::router(queue_state));
 
+    if let Err(e) = backend.ensure_registered().await {
+        tracing::warn!("self-registration failed: {}", e);
+    }
     if let Err(e) = backend.set_self_display_name("Guilhem").await {
         tracing::warn!("set display name failed: {}", e);
     }

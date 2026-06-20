@@ -87,6 +87,32 @@ impl AppserviceClient {
         Ok(user_id(local_part, &self.server_name))
     }
 
+    /// Materialize the appservice's own sender user so profile writes (display name)
+    /// succeed. Without this synapse has no profile row and the displayname PUT 500s.
+    /// Best-effort and idempotent (an already-registered user is fine).
+    pub async fn register_self(&self) -> Result<()> {
+        let local_part = self
+            .bot_user_id
+            .trim_start_matches('@')
+            .split(':')
+            .next()
+            .unwrap_or("charradissa")
+            .to_string();
+        let url = format!("{}/_matrix/client/v3/register", self.homeserver);
+        let body = serde_json::json!({
+            "type": "m.login.application_service",
+            "username": local_part,
+        });
+        self.client
+            .post(&url)
+            .header("Authorization", self.auth_header())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        Ok(())
+    }
+
     pub async fn room_messages(&self, room: &RoomId, limit: u32) -> Result<serde_json::Value> {
         let url = format!("{}/_matrix/client/v3/rooms/{}/messages?dir=b&limit={}",
             self.homeserver, pct(room.as_str()), limit);

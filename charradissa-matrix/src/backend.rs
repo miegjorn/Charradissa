@@ -16,6 +16,11 @@ impl MatrixBackend {
         Self { client: Arc::new(AppserviceClient::new(homeserver, as_token, bot_user_id, server_name)) }
     }
 
+    /// Materialize the appservice sender user (so profile writes work).
+    pub async fn ensure_registered(&self) -> Result<()> {
+        self.client.register_self().await
+    }
+
     /// Set the display name of the appservice sender (guilhem).
     pub async fn set_self_display_name(&self, name: &str) -> Result<()> {
         let user_id = self.client.bot_user_id().to_string();
