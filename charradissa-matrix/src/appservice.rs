@@ -1,26 +1,78 @@
-use axum::{extract::{Path, State}, http::StatusCode, Json};
+use axum::{extract::{Path, Query, State}, http::{HeaderMap, StatusCode}, Json};
+use charradissa_core::backend::ChatBackend;
+use charradissa_core::responder::{should_respond, Responder};
 use charradissa_core::types::{ChatEvent, ChatEventKind, RoomId, UserId};
 use chrono::Utc;
 use serde_json::Value;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct AppserviceState {
     pub hs_token: String,
+    pub responder: Arc<Responder>,
+    pub backend: Arc<dyn ChatBackend>,
+    pub self_user_id: String,
+}
+
+pub fn token_ok(provided: Option<&str>, expected: &str) -> bool {
+    provided == Some(expected)
 }
 
 /// Matrix Appservice PUT /_matrix/app/v1/transactions/{txnId}
 pub async fn handle_transaction(
     State(state): State<AppserviceState>,
-    Path(txn_id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+    Path(_txn): Path<String>,
     Json(body): Json<Value>,
 ) -> StatusCode {
+    // Resolve token: prefer Authorization: Bearer <tok>, fall back to ?access_token=
+    let resolved = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.to_string())
+        .or_else(|| q.get("access_token").cloned());
+
+    if !token_ok(resolved.as_deref(), &state.hs_token) {
+        return StatusCode::FORBIDDEN;
+    }
+
     let events = body["events"].as_array().cloned().unwrap_or_default();
-    for event in events {
-        if let Some(event) = parse_matrix_event(&event) {
-            tracing::info!("appservice event from {}: {}", event.sender, event.content);
+    for raw in events {
+        if let Some(ev) = parse_matrix_event(&raw) {
+            if !should_respond(&ev, &state.self_user_id) {
+                continue;
+            }
+            let (responder, backend) = (state.responder.clone(), state.backend.clone());
+            tokio::spawn(async move {
+                let history = backend
+                    .room_history(&ev.room_id, Utc::now())
+                    .await
+                    .unwrap_or_default();
+                match responder.reply(&history, &ev).await {
+                    Ok(text) if !text.trim().is_empty() => {
+                        let _ = backend.send_message(&ev.room_id, &text).await;
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::error!("guilhem reply failed: {}", e),
+                }
+            });
         }
     }
     StatusCode::OK
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_wrong_hs_token() {
+        assert!(token_ok(Some("good"), "good")); // correct token accepted
+        assert!(!token_ok(Some("bad"), "good")); // wrong token rejected
+        assert!(!token_ok(None, "good")); // missing token rejected
+    }
 }
 
 pub fn parse_matrix_event(event: &Value) -> Option<ChatEvent> {

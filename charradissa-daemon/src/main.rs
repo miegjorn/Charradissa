@@ -10,6 +10,7 @@ use charradissa_core::farcaster::MilestoneEvent;
 use charradissa_core::farcaster::FarcasterAgent;
 use charradissa_core::farcaster::ClaudeFarcasterAnalyzer;
 use charradissa_core::farga::HttpFargaWriter;
+use charradissa_core::responder::Responder;
 use charradissa_matrix::backend::MatrixBackend;
 use charradissa_matrix::appservice::AppserviceState;
 use axum::{routing::put, Router};
@@ -32,8 +33,8 @@ async fn main() -> anyhow::Result<()> {
     let backend = Arc::new(MatrixBackend::new(
         config.org.homeserver.clone(),
         as_token.clone(),
-        bot_user_id,
-        server_name,
+        bot_user_id.clone(),
+        server_name.clone(),
     ));
 
     // Milestone broadcast channel — sender is used by appservice handlers (future task),
@@ -62,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
         Box::new(FarcasterAgent::new(
             Arc::clone(&backend) as Arc<dyn charradissa_core::backend::ChatBackend>,
             Arc::new(HttpFargaWriter::new(farga_base_url)),
-            Arc::new(ClaudeFarcasterAnalyzer::new(anthropic_api_key)),
+            Arc::new(ClaudeFarcasterAnalyzer::new(anthropic_api_key.clone())),
             vec![], // projects populated from config in a future task
             HashMap::new(),
         )),
@@ -99,7 +100,17 @@ async fn main() -> anyhow::Result<()> {
     let queue_state = queue_api::QueueState { queue: Arc::clone(&persistent_queue) };
 
     let appservice_port = std::env::var("CHARRADISSA_PORT").unwrap_or("8448".into());
-    let appservice_state = AppserviceState { hs_token: as_token };
+    let responder = Arc::new(Responder::new(
+        anthropic_api_key.clone(),
+        "claude-sonnet-4-6".into(),
+        server_name.clone(),
+    ));
+    let appservice_state = AppserviceState {
+        hs_token: as_token.clone(),
+        responder,
+        backend: Arc::clone(&backend) as Arc<dyn charradissa_core::backend::ChatBackend>,
+        self_user_id: bot_user_id.clone(),
+    };
 
     let app = Router::new()
         .route("/_matrix/app/v1/transactions/:txnId",
