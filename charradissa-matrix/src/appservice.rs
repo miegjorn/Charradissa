@@ -25,7 +25,13 @@ pub async fn handle_transaction(
     Query(q): Query<std::collections::HashMap<String, String>>,
     Path(_txn): Path<String>,
     Json(body): Json<Value>,
-) -> StatusCode {
+) -> (StatusCode, Json<Value>) {
+    // The Matrix appservice spec requires a JSON body ({}) in the transaction
+    // response. Returning a bare 200 with an empty body makes synapse raise a
+    // JSONDecodeError, mark the transaction failed, and enter recovery — stalling
+    // all later transactions. Always answer with an (status, Json) pair.
+    let ack = || Json(serde_json::json!({}));
+
     // Resolve token: prefer Authorization: Bearer <tok>, fall back to ?access_token=
     let resolved = headers
         .get("authorization")
@@ -35,7 +41,7 @@ pub async fn handle_transaction(
         .or_else(|| q.get("access_token").cloned());
 
     if !token_ok(resolved.as_deref(), &state.hs_token) {
-        return StatusCode::FORBIDDEN;
+        return (StatusCode::FORBIDDEN, ack());
     }
 
     let events = body["events"].as_array().cloned().unwrap_or_default();
@@ -68,15 +74,17 @@ pub async fn handle_transaction(
                     .unwrap_or_default();
                 match responder.reply(&history, &ev).await {
                     Ok(text) if !text.trim().is_empty() => {
-                        let _ = backend.send_message(&ev.room_id, &text).await;
+                        if let Err(e) = backend.send_message(&ev.room_id, &text).await {
+                            tracing::error!("guilhem send failed: {}", e);
+                        }
                     }
-                    Ok(_) => {}
+                    Ok(_) => tracing::warn!("guilhem produced an empty reply"),
                     Err(e) => tracing::error!("guilhem reply failed: {}", e),
                 }
             });
         }
     }
-    StatusCode::OK
+    (StatusCode::OK, ack())
 }
 
 #[cfg(test)]
