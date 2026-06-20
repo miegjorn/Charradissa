@@ -13,8 +13,8 @@ permissions:
 
 jobs:
   build:
-    runs-on:
-  workflow_dispatch: ubuntu-latest
+
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -50,8 +50,8 @@ jobs:
           cache-to: type=gha,mode=max
 
   update-caissa:
-    runs-on:
-  workflow_dispatch: ubuntu-latest
+
+    runs-on: ubuntu-latest
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
