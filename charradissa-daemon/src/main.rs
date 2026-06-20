@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = milestone_tx; // suppress unused warning until appservice wiring is added
 
     let anthropic_api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
-    let farga_base_url = std::env::var("FARGA_BASE_URL")
+    let farga_base_url = std::env::var("FARGA_URL")
         .unwrap_or_else(|_| "http://farga:7500".into());
 
     let mut registry = registry::AgentRegistry::new();
