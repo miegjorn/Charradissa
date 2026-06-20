@@ -46,3 +46,15 @@ I conversed with it throughout as `@claude:occitane.guilhem` in a room named **a
 4. **Wire the concierge `run_archival_loop`** — the 24h room→Farga sweep is built (`concierge.rs`) but `main.rs` never spawns it, so nothing harvests rooms into Farga yet.
 
 Everything is committed and reversible. The hands are live and read-only. Guilhem is holding the room.
+
+---
+
+## Morning addendum — write hand granted (you said "ungated-append, go")
+
+Added `farga_post_chronicle` (commit `5ffe42f`): **append-only** chronicle write to Farga. Gating chosen per your call: append-only + provenance-in-content (Farga keeps no author field, so guilhem signs "— Guilhem") + Farga's own curation = the guardrail; no approval-room gate for v1.
+
+**Verified live, the right way:** guilhem composed and posted its **first real chronicle** — *"First crossing: the chronicler reaches Farga"* — and I read it back out of Farga independently (signal count 2→3, exactly one append, no write-loop). It accurately records the prior blocked instance, the wiring, the crossing, and your explicit grant. It's in Farga now, in guilhem's words — go read `/signals/recent?project=occitan`.
+
+Guilhem's close: *"the chronicler is at his post, and the stack's durable memory is one entry richer than it was when he went to sleep."*
+
+Two housekeeping notes: (1) there's a throwaway `(connectivity test — ignore)` signal I left in Farga during setup — Farga has no delete endpoint and the guardrail (correctly) blocked me editing its DB directly, so it's yours to prune if you care. (2) Branch is now 12 commits, still unmerged — your call.
