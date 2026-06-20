@@ -29,7 +29,12 @@ pub fn extract_signals(events: &[ChatEvent]) -> Vec<Signal> {
 pub fn harvest_digest(room: &RoomId, events: &[ChatEvent]) -> String {
     let mut s = format!("[room harvest: {}]\n", room.as_str());
     for e in events { s.push_str(&format!("{}: {}\n", e.sender, e.content)); }
-    if s.len() > 8000 { s.truncate(8000); s.push_str("\n…(truncated)"); }
+    if s.len() > 8000 {
+        let mut boundary = 8000;
+        while boundary > 0 && !s.is_char_boundary(boundary) { boundary -= 1; }
+        s.truncate(boundary);
+        s.push_str("\n…(truncated)");
+    }
     s
 }
 
