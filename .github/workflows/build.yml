@@ -1,0 +1,69 @@
+name: Build & push
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Charradissa's Dockerfile has a path dep on Amassada (amassada-core).
+      # Check it out as a named build context so the relative path resolves.
+      - uses: actions/checkout@v4
+        with:
+          repository: occitan/Amassada
+          path: amassada-src
+          token: ${{ secrets.OCCITAN_CI_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/occitan/charradissa
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+      - uses: docker/build-push-action@v5
+        with:
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          build-contexts: |
+            amassada=./amassada-src
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  update-caissa:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: occitan/Caissa
+          token: ${{ secrets.OCCITAN_CI_TOKEN }}
+          ref: main
+      - uses: mikefarah/yq@v4
+      - name: Bump image tag
+        run: |
+          export TAG="sha-${GITHUB_SHA:0:7}"
+          yq -i '.charradissa.imageTag = env(TAG)' deploy/charts/occitan/values.yaml
+          git config user.email "ci@occitan.dev"
+          git config user.name "Occitan CI"
+          git add deploy/charts/occitan/values.yaml
+          git diff --staged --quiet && echo "no-op" || \
+            git commit -m "chore(charradissa): deploy sha-${GITHUB_SHA:0:7}" && git push
