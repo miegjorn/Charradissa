@@ -26,13 +26,14 @@ async fn main() -> anyhow::Result<()> {
 
     let as_token = std::env::var("MATRIX_AS_TOKEN")
         .unwrap_or_else(|_| "dev-token".into());
-    let bot_user_id = format!("@charradissa:{}",
-        config.org.homeserver.trim_start_matches("https://").trim_start_matches("http://"));
+    let server_name = config.org.server_name.clone();
+    let bot_user_id = format!("@guilhem:{}", server_name);
 
     let backend = Arc::new(MatrixBackend::new(
         config.org.homeserver.clone(),
         as_token.clone(),
         bot_user_id,
+        server_name,
     ));
 
     // Milestone broadcast channel — sender is used by appservice handlers (future task),

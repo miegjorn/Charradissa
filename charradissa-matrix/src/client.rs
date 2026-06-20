@@ -7,11 +7,12 @@ pub struct AppserviceClient {
     homeserver: String,
     as_token: String,
     bot_user_id: String,
+    server_name: String,
 }
 
 impl AppserviceClient {
-    pub fn new(homeserver: String, as_token: String, bot_user_id: String) -> Self {
-        Self { client: Client::new(), homeserver, as_token, bot_user_id }
+    pub fn new(homeserver: String, as_token: String, bot_user_id: String, server_name: String) -> Self {
+        Self { client: Client::new(), homeserver, as_token, bot_user_id, server_name }
     }
 
     fn auth_header(&self) -> String {
@@ -72,8 +73,20 @@ impl AppserviceClient {
             .json(&body)
             .send().await
             .map_err(|e| CharradissaError::Backend(e.to_string()))?;
-        let user_id = format!("@{}:{}", local_part,
-            self.homeserver.trim_start_matches("https://").trim_start_matches("http://"));
-        Ok(UserId::new(&user_id))
+        Ok(user_id(local_part, &self.server_name))
+    }
+}
+
+pub fn user_id(local_part: &str, server_name: &str) -> UserId {
+    UserId::new(&format!("@{}:{}", local_part, server_name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn user_id_uses_server_name_not_url() {
+        // server_name is occitane.guilhem even though the HTTP host is synapse:8008
+        assert_eq!(user_id("guilhem", "occitane.guilhem").as_str(), "@guilhem:occitane.guilhem");
     }
 }

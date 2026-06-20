@@ -11,8 +11,8 @@ pub struct MatrixBackend {
 }
 
 impl MatrixBackend {
-    pub fn new(homeserver: String, as_token: String, bot_user_id: String) -> Self {
-        Self { client: Arc::new(AppserviceClient::new(homeserver, as_token, bot_user_id)) }
+    pub fn new(homeserver: String, as_token: String, bot_user_id: String, server_name: String) -> Self {
+        Self { client: Arc::new(AppserviceClient::new(homeserver, as_token, bot_user_id, server_name)) }
     }
 }
 

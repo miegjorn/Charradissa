@@ -14,7 +14,11 @@ pub struct Config {
 pub struct OrgConfig {
     pub name: String,
     pub homeserver: String,
+    #[serde(default = "default_server_name")]
+    pub server_name: String,
 }
+
+fn default_server_name() -> String { "occitane.guilhem".into() }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BackendConfig {
