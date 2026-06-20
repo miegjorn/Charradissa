@@ -18,4 +18,5 @@ pub trait ChatBackend: Send + Sync {
     async fn room_history(&self, room: &RoomId, since: DateTime<Utc>) -> Result<Vec<ChatEvent>>;
     async fn delete_room(&self, room: &RoomId) -> Result<()>;
     async fn join_room(&self, room: &RoomId) -> Result<()> { Ok(()) }
+    async fn joined_rooms(&self) -> Result<Vec<RoomId>> { Ok(vec![]) }
 }

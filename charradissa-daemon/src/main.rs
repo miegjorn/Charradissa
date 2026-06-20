@@ -44,8 +44,8 @@ async fn main() -> anyhow::Result<()> {
     let _ = milestone_tx; // suppress unused warning until appservice wiring is added
 
     let anthropic_api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
-    let farga_base_url = std::env::var("FARGA_BASE_URL")
-        .unwrap_or_else(|_| "http://localhost:9000".into());
+    let farga_base_url = std::env::var("FARGA_URL")
+        .unwrap_or_else(|_| "http://farga:7500".into());
 
     let mut registry = registry::AgentRegistry::new();
     let _ = &mut registry; // suppress unused warning — populated in future tasks
@@ -91,6 +91,9 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         concierge_ticks.run_system_agent_ticks().await;
     });
+
+    let concierge_archival = Arc::clone(&concierge);
+    tokio::spawn(async move { concierge_archival.run_archival_loop().await; });
 
     tracing::info!("charradissa-daemon starting for org: {}", config.org.name);
 

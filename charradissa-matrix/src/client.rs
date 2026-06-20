@@ -126,6 +126,16 @@ impl AppserviceClient {
         &self.bot_user_id
     }
 
+    pub async fn joined_rooms(&self) -> Result<Vec<RoomId>> {
+        let url = format!("{}/_matrix/client/v3/joined_rooms", self.homeserver);
+        let resp = self.client.get(&url).header("Authorization", self.auth_header())
+            .send().await.map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        let resp = resp.error_for_status().map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        let j: serde_json::Value = resp.json().await.map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        Ok(j["joined_rooms"].as_array().cloned().unwrap_or_default()
+            .iter().filter_map(|v| v.as_str().map(RoomId::new)).collect())
+    }
+
     pub async fn join_room(&self, alias_or_id: &str) -> Result<RoomId> {
         let url = format!("{}/_matrix/client/v3/join/{}", self.homeserver, pct(alias_or_id));
         let resp = self.client.post(&url)

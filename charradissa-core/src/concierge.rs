@@ -25,6 +25,14 @@ pub fn extract_signals(events: &[ChatEvent]) -> Vec<Signal> {
     }).collect()
 }
 
+/// Format a room's recent events into a single durable digest signal body.
+pub fn harvest_digest(room: &RoomId, events: &[ChatEvent]) -> String {
+    let mut s = format!("[room harvest: {}]\n", room.as_str());
+    for e in events { s.push_str(&format!("{}: {}\n", e.sender, e.content)); }
+    if s.len() > 8000 { s.truncate(8000); s.push_str("\n…(truncated)"); }
+    s
+}
+
 pub struct ConciergeAgent {
     backend: Arc<dyn ChatBackend>,
     farga: Arc<dyn FargaWriter>,
@@ -102,20 +110,23 @@ impl ConciergeAgent {
         let mut ticker = interval(Duration::from_secs(self.archival_interval_hours * 3600));
         loop {
             ticker.tick().await;
-            for project in &self.projects {
-                let room_id = RoomId::new(&format!("#{}", project.as_str()));
-                let since = Utc::now() - chrono::Duration::hours(self.archival_interval_hours as i64);
-                match self.backend.room_history(&room_id, since).await {
+            let since = Utc::now() - chrono::Duration::hours(self.archival_interval_hours as i64);
+            let rooms = self.backend.joined_rooms().await.unwrap_or_default();
+            tracing::info!("concierge archival: sweeping {} joined rooms", rooms.len());
+            for room in &rooms {
+                match self.backend.room_history(room, since).await {
                     Ok(events) if !events.is_empty() => {
-                        let signals = extract_signals(&events);
-                        if !signals.is_empty() {
-                            if let Err(e) = self.farga.write_signals(project, signals).await {
-                                tracing::error!("concierge: farga write failed for {}: {}", project, e);
-                            }
+                        let sig = Signal {
+                            project: "occitan".into(),
+                            content: harvest_digest(room, &events),
+                            source: "concierge-archival".into(),
+                        };
+                        if let Err(e) = self.farga.write_signals(&ProjectId::new("occitan"), vec![sig]).await {
+                            tracing::error!("concierge: farga write failed for {}: {}", room, e);
                         }
                     }
                     Ok(_) => {}
-                    Err(e) => tracing::error!("concierge: room_history failed for {}: {}", project, e),
+                    Err(e) => tracing::error!("concierge: room_history failed for {}: {}", room, e),
                 }
             }
         }
@@ -137,5 +148,49 @@ impl ConciergeAgent {
             tracing::info!("concierge convergence sweep: {} signals across {} projects",
                 all_signals.len(), self.projects.len());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ChatEventKind, UserId};
+    use chrono::Utc;
+
+    #[test]
+    fn harvest_digest_contains_sender_content_and_room() {
+        let room = RoomId::new("!abc:occitane.guilhem");
+        let events = vec![
+            ChatEvent {
+                event_id: "$1".into(),
+                room_id: room.clone(),
+                sender: UserId::new("@p:occitane.guilhem"),
+                content: "hello world".into(),
+                timestamp: Utc::now(),
+                kind: ChatEventKind::Message,
+            },
+        ];
+        let digest = harvest_digest(&room, &events);
+        assert!(digest.contains("!abc:occitane.guilhem"), "must include room id");
+        assert!(digest.contains("@p:occitane.guilhem"), "must include sender");
+        assert!(digest.contains("hello world"), "must include content");
+    }
+
+    #[test]
+    fn harvest_digest_truncates_at_8000() {
+        let room = RoomId::new("!r:s");
+        let events = vec![
+            ChatEvent {
+                event_id: "$1".into(),
+                room_id: room.clone(),
+                sender: UserId::new("@u:s"),
+                content: "x".repeat(9000),
+                timestamp: Utc::now(),
+                kind: ChatEventKind::Message,
+            },
+        ];
+        let digest = harvest_digest(&room, &events);
+        assert!(digest.len() <= 8030, "truncated digest should not exceed 8000 + truncation suffix");
+        assert!(digest.contains("truncated"), "must include truncation marker");
     }
 }

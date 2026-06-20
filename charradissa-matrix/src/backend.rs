@@ -84,6 +84,10 @@ impl ChatBackend for MatrixBackend {
     async fn join_room(&self, room: &RoomId) -> Result<()> {
         self.client.join_room(room.as_str()).await.map(|_| ())
     }
+
+    async fn joined_rooms(&self) -> Result<Vec<RoomId>> {
+        self.client.joined_rooms().await
+    }
 }
 
 /// Number of recent messages fed to guilhem as conversational context each turn.
