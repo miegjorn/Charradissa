@@ -396,6 +396,22 @@ cargo build --workspace
 cargo build -p charradissa-daemon --release
 ```
 
+### Container image
+
+`charradissa-core` has a path dependency on `amassada-core` (`../../Amassada/crates/amassada-core`),
+so the Docker build needs the **Amassada repo as a named build context** — `Amassada` must sit
+as a sibling of this repo. The builder uses `rust:1.90-slim`:
+
+```sh
+# run from the parent directory that holds both repos
+docker build --build-context amassada=./Amassada \
+  -t ghcr.io/occitan/charradissa:latest ./Charradissa
+```
+
+For local kind deployment, load it in afterwards:
+`kind load docker-image ghcr.io/occitan/charradissa:latest --name occitan`.
+See `Caissa/docs/install.md` (step 3e) for the full stack.
+
 ### Run
 
 ```sh
