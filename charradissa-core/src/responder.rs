@@ -196,7 +196,10 @@ impl Responder {
                         "canvas_id": {"type": "string", "description": "Optional canvas ID (default: 'design-session')."}
                     },
                     "required": ["goal"]
-                }
+                },
+                // Prompt-caching breakpoint on the last tool. The entire stable tools array
+                // (~1058 tokens) is cached here, saving re-processing on every tool round.
+                "cache_control": {"type": "ephemeral"}
             }
         ])
     }
@@ -359,7 +362,10 @@ impl Responder {
             let body = serde_json::json!({
                 "model": self.model,
                 "max_tokens": MAX_TOKENS,
-                "system": GUILHEM_SYSTEM,
+                // system as array-of-blocks: cache_control on the sole block caches the
+                // entire ~508-token system prompt. Combined with the tools breakpoint
+                // this gives ~1566 cached tokens per round.
+                "system": [{"type": "text", "text": GUILHEM_SYSTEM, "cache_control": {"type": "ephemeral"}}],
                 "tools": Self::tools(),
                 "messages": messages,
             });
@@ -369,6 +375,7 @@ impl Responder {
                 .post("https://api.anthropic.com/v1/messages")
                 .header("x-api-key", &self.api_key)
                 .header("anthropic-version", "2023-06-01")
+                .header("anthropic-beta", "prompt-caching-2024-07-31")
                 .header("content-type", "application/json")
                 .json(&body)
                 .send()
