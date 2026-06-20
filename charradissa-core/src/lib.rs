@@ -10,3 +10,4 @@ pub mod concierge;
 pub mod agents;
 pub mod transport;
 pub mod farcaster;
+pub mod responder;
