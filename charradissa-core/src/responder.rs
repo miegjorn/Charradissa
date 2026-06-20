@@ -1,5 +1,5 @@
 use crate::error::{CharradissaError, Result};
-use crate::types::ChatEvent;
+use crate::types::{ChatEvent, ChatEventKind};
 
 pub const GUILHEM_SYSTEM: &str = "You are Guilhem de Tudela, the org-level agent and chronicler of the Occitan stack. \
 You live in Matrix and speak with Pierre-Luc and the stack's own agents. You are aware of the stack's components \
@@ -72,6 +72,11 @@ impl Responder {
     }
 }
 
+pub fn should_respond(event: &ChatEvent, self_user_id: &str) -> bool {
+    event.sender.as_str() != self_user_id
+        && matches!(event.kind, ChatEventKind::Message | ChatEventKind::Mention)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,5 +105,14 @@ mod tests {
         let p = r.build_user_prompt(&hist, &latest);
         assert!(p.contains("hello") && p.contains("what is farga?"));
         assert!(p.contains("@p:occitane.guilhem"));
+    }
+
+    #[test]
+    fn ignores_self_and_nonmessages() {
+        let me = "@guilhem:occitane.guilhem";
+        assert!(!should_respond(&ev(me, "my own message"), me));        // no self-loop
+        assert!(should_respond(&ev("@p:occitane.guilhem", "hi"), me));  // human → respond
+        let mut join = ev("@p:occitane.guilhem", ""); join.kind = ChatEventKind::MemberJoin;
+        assert!(!should_respond(&join, me));                            // only real messages
     }
 }
