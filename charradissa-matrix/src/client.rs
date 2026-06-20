@@ -75,6 +75,14 @@ impl AppserviceClient {
             .map_err(|e| CharradissaError::Backend(e.to_string()))?;
         Ok(user_id(local_part, &self.server_name))
     }
+
+    pub async fn room_messages(&self, room: &RoomId, limit: u32) -> Result<serde_json::Value> {
+        let url = format!("{}/_matrix/client/v3/rooms/{}/messages?dir=b&limit={}",
+            self.homeserver, room.as_str(), limit);
+        let resp = self.client.get(&url).header("Authorization", self.auth_header())
+            .send().await.map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        resp.json().await.map_err(|e| CharradissaError::Backend(e.to_string()))
+    }
 }
 
 pub fn user_id(local_part: &str, server_name: &str) -> UserId {

@@ -5,6 +5,7 @@ use charradissa_core::backend::ChatBackend;
 use charradissa_core::error::Result;
 use charradissa_core::types::*;
 use crate::client::AppserviceClient;
+use serde_json;
 
 pub struct MatrixBackend {
     client: Arc<AppserviceClient>,
@@ -59,12 +60,48 @@ impl ChatBackend for MatrixBackend {
         Ok(())
     }
 
-    async fn room_history(&self, _room: &RoomId, _since: DateTime<Utc>) -> Result<Vec<ChatEvent>> {
-        Ok(vec![])
+    async fn room_history(&self, room: &RoomId, _since: DateTime<Utc>) -> Result<Vec<ChatEvent>> {
+        let body = self.client.room_messages(room, HISTORY_LIMIT).await?;
+        Ok(parse_messages_chunk(&body, room))
     }
 
     async fn delete_room(&self, room: &RoomId) -> Result<()> {
         tracing::info!("delete room: {}", room);
         Ok(())
+    }
+}
+
+/// Number of recent messages fed to guilhem as conversational context each turn.
+pub const HISTORY_LIMIT: u32 = 20;
+
+pub fn parse_messages_chunk(body: &serde_json::Value, room: &RoomId) -> Vec<ChatEvent> {
+    let mut evs: Vec<ChatEvent> = body["chunk"].as_array().cloned().unwrap_or_default().iter()
+        .filter(|e| e["type"] == "m.room.message")
+        .filter_map(|e| Some(ChatEvent {
+            event_id: e["event_id"].as_str()?.to_string(),
+            room_id: room.clone(),
+            sender: UserId::new(e["sender"].as_str()?),
+            content: e["content"]["body"].as_str().unwrap_or("").to_string(),
+            timestamp: Utc::now(),
+            kind: ChatEventKind::Message,
+        }))
+        .collect();
+    evs.reverse(); // /messages dir=b is newest-first; callers want oldest-first
+    evs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn parses_messages_response_oldest_first() {
+        let body = serde_json::json!({"chunk":[
+            {"type":"m.room.message","event_id":"$b","sender":"@p:occitane.guilhem","origin_server_ts":2,"content":{"msgtype":"m.text","body":"second"}},
+            {"type":"m.room.message","event_id":"$a","sender":"@p:occitane.guilhem","origin_server_ts":1,"content":{"msgtype":"m.text","body":"first"}}
+        ]});
+        let evs = parse_messages_chunk(&body, &RoomId::new("!r:occitane.guilhem"));
+        assert_eq!(evs.len(), 2);
+        assert_eq!(evs[0].content, "first"); // dir=b returns newest-first; we reverse to oldest-first
+        assert_eq!(evs[1].content, "second");
     }
 }
