@@ -100,10 +100,13 @@ async fn main() -> anyhow::Result<()> {
     let queue_state = queue_api::QueueState { queue: Arc::clone(&persistent_queue) };
 
     let appservice_port = std::env::var("CHARRADISSA_PORT").unwrap_or("8448".into());
+    // Farga HTTP base for guilhem's read-only introspection tools.
+    let farga_http_url = std::env::var("FARGA_URL").unwrap_or_else(|_| "http://farga:7500".into());
     let responder = Arc::new(Responder::new(
         anthropic_api_key.clone(),
         "claude-sonnet-4-6".into(),
         server_name.clone(),
+        farga_http_url,
     ));
     let appservice_state = AppserviceState {
         hs_token: as_token.clone(),
