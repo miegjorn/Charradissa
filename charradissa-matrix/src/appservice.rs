@@ -1,6 +1,6 @@
 use axum::{extract::{Path, Query, State}, http::{HeaderMap, StatusCode}, Json};
 use charradissa_core::backend::ChatBackend;
-use charradissa_core::responder::{should_respond, Responder};
+use charradissa_core::responder::should_respond;
 use charradissa_core::types::{ChatEvent, ChatEventKind, RoomId, UserId};
 use chrono::Utc;
 use serde_json::Value;
@@ -9,7 +9,9 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct AppserviceState {
     pub hs_token: String,
-    pub responder: Arc<Responder>,
+    /// URL of the Guilhem pod's listen server — the actual brain.
+    /// Charradissa is transport; Guilhem generates all replies.
+    pub guilhem_url: String,
     pub backend: Arc<dyn ChatBackend>,
     pub self_user_id: String,
 }
@@ -66,13 +68,13 @@ pub async fn handle_transaction(
             if !should_respond(&ev, &state.self_user_id) {
                 continue;
             }
-            let (responder, backend) = (state.responder.clone(), state.backend.clone());
+            let (guilhem_url, backend) = (state.guilhem_url.clone(), state.backend.clone());
             tokio::spawn(async move {
                 let history = backend
                     .room_history(&ev.room_id, Utc::now())
                     .await
                     .unwrap_or_default();
-                match responder.reply(&history, &ev).await {
+                match call_guilhem(&guilhem_url, &history, &ev).await {
                     Ok(text) if !text.trim().is_empty() => {
                         if let Err(e) = backend.send_message(&ev.room_id, &text).await {
                             tracing::error!("guilhem send failed: {}", e);
@@ -85,6 +87,47 @@ pub async fn handle_transaction(
         }
     }
     (StatusCode::OK, ack())
+}
+
+async fn call_guilhem(guilhem_url: &str, history: &[ChatEvent], ev: &ChatEvent) -> Result<String, String> {
+    #[derive(serde::Serialize)]
+    struct HistoryEntry<'a> {
+        sender: &'a str,
+        content: &'a str,
+    }
+    #[derive(serde::Serialize)]
+    struct Req<'a> {
+        room_id: &'a str,
+        sender: &'a str,
+        content: &'a str,
+        history: Vec<HistoryEntry<'a>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        text: String,
+    }
+
+    let req = Req {
+        room_id: ev.room_id.as_str(),
+        sender: ev.sender.as_str(),
+        content: &ev.content,
+        history: history
+            .iter()
+            .map(|e| HistoryEntry { sender: e.sender.as_str(), content: &e.content })
+            .collect(),
+    };
+
+    reqwest::Client::new()
+        .post(format!("{}/matrix/reply", guilhem_url))
+        .timeout(std::time::Duration::from_secs(300))
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .json::<Resp>()
+        .await
+        .map_err(|e| e.to_string())
+        .map(|r| r.text)
 }
 
 #[cfg(test)]

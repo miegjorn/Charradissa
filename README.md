@@ -414,8 +414,13 @@ For local kind deployment, load it in afterwards:
 `kind load docker-image ghcr.io/occitan/charradissa:latest --name occitan`.
 See `Caissa/docs/install.md` (step 3e) for the full stack.
 
-> **Prompt caching**: `responder.rs` sends Anthropic prompt-cache headers on Guilhem Matrix
-> replies, reducing cost on repeated system-prompt content.
+> **Architecture**: Charradissa is the Matrix transport layer only. When a message arrives,
+> `handle_transaction` fetches room history and forwards the event to Guilhem's
+> `POST /matrix/reply` endpoint (`GUILHEM_URL` env, defaults to
+> `http://guilhem.agents.svc.cluster.local:8080`). Guilhem runs `claude --print` with his
+> full persona, Farga MCP, and `Bash` (giving access to `gh`, `glab`, `git`), then returns
+> the reply text. Charradissa posts it back to Matrix. `responder.rs` is retained for
+> reference and its tests, but is no longer in the production reply path.
 
 ### Run
 

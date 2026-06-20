@@ -10,7 +10,6 @@ use charradissa_core::farcaster::MilestoneEvent;
 use charradissa_core::farcaster::FarcasterAgent;
 use charradissa_core::farcaster::ClaudeFarcasterAnalyzer;
 use charradissa_core::farga::HttpFargaWriter;
-use charradissa_core::responder::Responder;
 use charradissa_matrix::backend::MatrixBackend;
 use charradissa_matrix::appservice::AppserviceState;
 use axum::{routing::put, Router};
@@ -103,23 +102,11 @@ async fn main() -> anyhow::Result<()> {
     let queue_state = queue_api::QueueState { queue: Arc::clone(&persistent_queue) };
 
     let appservice_port = std::env::var("CHARRADISSA_PORT").unwrap_or("8448".into());
-    // Farga HTTP base for guilhem's read-only introspection tools.
-    let farga_http_url = std::env::var("FARGA_URL").unwrap_or_else(|_| "http://farga:7500".into());
-    let dispatcher_url = std::env::var("DISPATCHER_MCP_URL")
-        .unwrap_or_else(|_| "http://dispatcher.agents.svc.cluster.local:9090/mcp".into());
-    let amassada_url = std::env::var("AMASSADA_URL")
-        .unwrap_or_else(|_| "http://amassada:7700".into());
-    let responder = Arc::new(Responder::new(
-        anthropic_api_key.clone(),
-        "claude-sonnet-4-6".into(),
-        server_name.clone(),
-        farga_http_url,
-        dispatcher_url,
-        amassada_url,
-    ));
+    let guilhem_url = std::env::var("GUILHEM_URL")
+        .unwrap_or_else(|_| "http://guilhem.agents.svc.cluster.local:8080".into());
     let appservice_state = AppserviceState {
         hs_token: as_token.clone(),
-        responder,
+        guilhem_url,
         backend: Arc::clone(&backend) as Arc<dyn charradissa_core::backend::ChatBackend>,
         self_user_id: bot_user_id.clone(),
     };
