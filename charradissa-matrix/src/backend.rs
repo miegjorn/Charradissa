@@ -15,6 +15,12 @@ impl MatrixBackend {
     pub fn new(homeserver: String, as_token: String, bot_user_id: String, server_name: String) -> Self {
         Self { client: Arc::new(AppserviceClient::new(homeserver, as_token, bot_user_id, server_name)) }
     }
+
+    /// Set the display name of the appservice sender (guilhem).
+    pub async fn set_self_display_name(&self, name: &str) -> Result<()> {
+        let user_id = self.client.bot_user_id().to_string();
+        self.client.set_display_name(&user_id, name).await
+    }
 }
 
 #[async_trait]
@@ -68,6 +74,10 @@ impl ChatBackend for MatrixBackend {
     async fn delete_room(&self, room: &RoomId) -> Result<()> {
         tracing::info!("delete room: {}", room);
         Ok(())
+    }
+
+    async fn join_room(&self, room: &RoomId) -> Result<()> {
+        self.client.join_room(room.as_str()).await.map(|_| ())
     }
 }
 

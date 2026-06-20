@@ -10,6 +10,17 @@ pub struct AppserviceClient {
     server_name: String,
 }
 
+/// Percent-encode a Matrix path segment (room ID / user ID / alias).
+/// Encodes `!`, `#`, `@`, `:` so they survive as a URL path component.
+pub fn pct(s: &str) -> String {
+    s.chars().map(|c| match c {
+        '!' | '#' | '@' | ':' | '/' | '?' | '&' | '=' | '+' | ' ' => {
+            format!("%{:02X}", c as u32)
+        }
+        _ => c.to_string(),
+    }).collect()
+}
+
 impl AppserviceClient {
     pub fn new(homeserver: String, as_token: String, bot_user_id: String, server_name: String) -> Self {
         Self { client: Client::new(), homeserver, as_token, bot_user_id, server_name }
@@ -83,6 +94,46 @@ impl AppserviceClient {
             .send().await.map_err(|e| CharradissaError::Backend(e.to_string()))?;
         resp.json().await.map_err(|e| CharradissaError::Backend(e.to_string()))
     }
+
+    pub fn bot_user_id(&self) -> &str {
+        &self.bot_user_id
+    }
+
+    pub async fn join_room(&self, alias_or_id: &str) -> Result<RoomId> {
+        let url = format!("{}/_matrix/client/v3/join/{}", self.homeserver, pct(alias_or_id));
+        let resp = self.client.post(&url)
+            .header("Authorization", self.auth_header())
+            .json(&serde_json::json!({}))
+            .send().await
+            .map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            return Err(CharradissaError::Backend(format!("join_room failed: {}", status)));
+        }
+        let json: serde_json::Value = resp.json().await
+            .map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        let room_id = json["room_id"].as_str()
+            .ok_or_else(|| CharradissaError::Backend("no room_id in join response".into()))?;
+        Ok(RoomId::new(room_id))
+    }
+
+    pub async fn set_display_name(&self, user_id: &str, name: &str) -> Result<()> {
+        let url = format!(
+            "{}/_matrix/client/v3/profile/{}/displayname",
+            self.homeserver, pct(user_id)
+        );
+        let body = serde_json::json!({ "displayname": name });
+        let resp = self.client.put(&url)
+            .header("Authorization", self.auth_header())
+            .json(&body)
+            .send().await
+            .map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            return Err(CharradissaError::Backend(format!("set_display_name failed: {}", status)));
+        }
+        Ok(())
+    }
 }
 
 pub fn user_id(local_part: &str, server_name: &str) -> UserId {
@@ -92,9 +143,20 @@ pub fn user_id(local_part: &str, server_name: &str) -> UserId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn user_id_uses_server_name_not_url() {
         // server_name is occitane.guilhem even though the HTTP host is synapse:8008
         assert_eq!(user_id("guilhem", "occitane.guilhem").as_str(), "@guilhem:occitane.guilhem");
+    }
+
+    #[test]
+    fn pct_encodes_matrix_sigils_and_colon() {
+        // Room IDs and aliases must be percent-encoded to survive as a URL path segment.
+        assert_eq!(pct("!room:server"), "%21room%3Aserver");
+        assert_eq!(pct("#alias:server"), "%23alias%3Aserver");
+        assert_eq!(pct("@user:server"), "%40user%3Aserver");
+        // Plain ASCII letters are passed through unchanged.
+        assert_eq!(pct("plain"), "plain");
     }
 }

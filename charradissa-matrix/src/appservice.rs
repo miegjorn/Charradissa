@@ -40,6 +40,22 @@ pub async fn handle_transaction(
 
     let events = body["events"].as_array().cloned().unwrap_or_default();
     for raw in events {
+        // Auto-join on invite before attempting message parsing.
+        if raw["type"] == "m.room.member"
+            && raw["content"]["membership"] == "invite"
+            && raw["state_key"].as_str() == Some(state.self_user_id.as_str())
+        {
+            if let Some(room) = raw["room_id"].as_str() {
+                let (backend, room) = (state.backend.clone(), RoomId::new(room));
+                tokio::spawn(async move {
+                    if let Err(e) = backend.join_room(&room).await {
+                        tracing::warn!("auto-join failed: {}", e);
+                    }
+                });
+            }
+            continue; // membership events are not messages
+        }
+
         if let Some(ev) = parse_matrix_event(&raw) {
             if !should_respond(&ev, &state.self_user_id) {
                 continue;

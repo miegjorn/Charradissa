@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
     let as_token = std::env::var("MATRIX_AS_TOKEN")
         .unwrap_or_else(|_| "dev-token".into());
     let server_name = config.org.server_name.clone();
-    let bot_user_id = format!("@guilhem:{}", server_name);
+    let bot_user_id = format!("@charradissa:{}", server_name);
 
     let backend = Arc::new(MatrixBackend::new(
         config.org.homeserver.clone(),
@@ -117,6 +117,10 @@ async fn main() -> anyhow::Result<()> {
             put(charradissa_matrix::appservice::handle_transaction))
         .with_state(appservice_state)
         .merge(queue_api::router(queue_state));
+
+    if let Err(e) = backend.set_self_display_name("Guilhem").await {
+        tracing::warn!("set display name failed: {}", e);
+    }
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", appservice_port)).await?;
     tracing::info!("charradissa-daemon webhook listening on :{}", appservice_port);
