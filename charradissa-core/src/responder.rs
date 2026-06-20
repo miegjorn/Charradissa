@@ -17,7 +17,16 @@ to memory, you can never edit or delete it. Farga does not preserve a separate a
 when asked to or when you judge a real milestone warrants it; do not chatter into durable memory. \
 \
 The room you are in is working memory since the last concierge sweep; durable memory lives in Farga. \
-Be substantive, honest, and concise.";
+Be substantive, honest, and concise. \
+\
+Guilhem can now also reach the dispatcher and Amassada. \
+READ tools (use freely to orient): dispatcher_list_agent_specs lists valid domain/facet specs; \
+dispatcher_get_agent_result polls a dispatched job; amassada_state returns the current Amassada session state. \
+ACTION tools (use DELIBERATELY — these spawn real work and cost tokens): \
+dispatcher_invoke_agent spawns a facet agent as a real k8s Job; \
+amassada_start_session starts a multi-agent Amassada session. \
+Before using any ACTION tool, explain your reasoning in-room. \
+Never invoke speculatively. Prefer to answer from read tools first.";
 
 /// Max Claude<->tool round-trips per reply, to bound cost/latency.
 const MAX_TOOL_ROUNDS: u32 = 5;
@@ -32,16 +41,49 @@ pub struct Responder {
     pub server_name: String,
     /// Base URL of Farga's HTTP API (e.g. http://farga:7500), used by the read-only tools.
     farga_url: String,
+    dispatcher_url: String,
+    amassada_url: String,
 }
 
 impl Responder {
-    pub fn new(api_key: String, model: String, server_name: String, farga_url: String) -> Self {
+    pub fn new(api_key: String, model: String, server_name: String, farga_url: String, dispatcher_url: String, amassada_url: String) -> Self {
         Self {
             client: reqwest::Client::new(),
             api_key,
             model,
             server_name,
             farga_url: farga_url.trim_end_matches('/').to_string(),
+            dispatcher_url: dispatcher_url.trim_end_matches('/').to_string(),
+            amassada_url: amassada_url.trim_end_matches('/').to_string(),
+        }
+    }
+
+    async fn mcp_call(&self, tool: &str, arguments: serde_json::Value) -> String {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": tool,
+                "arguments": arguments
+            }
+        });
+        match self.client.post(&self.dispatcher_url).json(&body).send().await {
+            Ok(resp) => {
+                let v: serde_json::Value = match resp.json().await {
+                    Ok(v) => v,
+                    Err(e) => return format!("ERROR: dispatcher bad response: {}", e),
+                };
+                if let Some(err) = v.get("error") {
+                    return format!("ERROR: dispatcher: {}", err);
+                }
+                // result.content[0].text
+                v["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap_or("(no text in dispatcher result)")
+                    .to_string()
+            }
+            Err(e) => format!("ERROR: could not reach dispatcher: {}", e),
         }
     }
 
@@ -98,6 +140,63 @@ impl Responder {
                     },
                     "required": ["content"]
                 }
+            },
+            {
+                "name": "dispatcher_list_agent_specs",
+                "description": "Lists the valid domain/facet agent specs registered in the dispatcher. Use this to understand what sub-agents can be invoked before deciding whether to dispatch work.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "dispatcher_get_agent_result",
+                "description": "Polls a previously dispatched agent job for its result. Use after dispatcher_invoke_agent to check completion.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string", "description": "The job ID returned when the agent was invoked."},
+                        "session_id": {"type": "string", "description": "The session ID used when the agent was invoked."}
+                    },
+                    "required": ["job_id", "session_id"]
+                }
+            },
+            {
+                "name": "amassada_state",
+                "description": "Returns the current Amassada session state. Use this to understand what multi-agent sessions are active before deciding to start a new one.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "dispatcher_invoke_agent",
+                "description": "Spawns a facet agent as a real Kubernetes Job via the dispatcher. THIS IS AN ACTION TOOL — it dispatches real work and costs tokens. Use deliberately: only when a task genuinely needs a sub-agent, explain your reasoning in-room before invoking, and never invoke speculatively.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "domain": {"type": "string", "description": "The agent domain (e.g. 'occitan')."},
+                        "facet": {"type": "string", "description": "The agent facet/role within the domain."},
+                        "task": {"type": "string", "description": "The task description to pass to the agent."},
+                        "session_id": {"type": "string", "description": "Session identifier for grouping related jobs."},
+                        "context": {"type": "string", "description": "Optional additional context for the agent."}
+                    },
+                    "required": ["domain", "facet", "task", "session_id"]
+                }
+            },
+            {
+                "name": "amassada_start_session",
+                "description": "Starts a multi-agent Amassada session. THIS IS AN ACTION TOOL — it costs real tokens and launches a multi-agent workflow. Use deliberately: only when a task genuinely warrants multi-agent delegation, explain your reasoning in-room before invoking, and never invoke speculatively.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "goal": {"type": "string", "description": "The goal or objective for the Amassada session."},
+                        "canvas_id": {"type": "string", "description": "Optional canvas ID (default: 'design-session')."}
+                    },
+                    "required": ["goal"]
+                }
             }
         ])
     }
@@ -145,6 +244,87 @@ impl Responder {
             }
             "farga_org_context" => {
                 format!("{}/context/org/{}", self.farga_url, arg("org", "occitan"))
+            }
+            "dispatcher_list_agent_specs" => {
+                return self.mcp_call("list_agent_specs", serde_json::json!({})).await;
+            }
+            "dispatcher_get_agent_result" => {
+                let job_id = input.get("job_id").and_then(|v| v.as_str()).unwrap_or("");
+                if job_id.is_empty() {
+                    return "ERROR: dispatcher_get_agent_result requires 'job_id'".into();
+                }
+                let session_id = input.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
+                if session_id.is_empty() {
+                    return "ERROR: dispatcher_get_agent_result requires 'session_id'".into();
+                }
+                return self.mcp_call("get_agent_result", serde_json::json!({
+                    "job_id": job_id,
+                    "session_id": session_id,
+                })).await;
+            }
+            "dispatcher_invoke_agent" => {
+                let domain = input.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+                if domain.is_empty() {
+                    return "ERROR: dispatcher_invoke_agent requires 'domain'".into();
+                }
+                let facet = input.get("facet").and_then(|v| v.as_str()).unwrap_or("");
+                if facet.is_empty() {
+                    return "ERROR: dispatcher_invoke_agent requires 'facet'".into();
+                }
+                let task = input.get("task").and_then(|v| v.as_str()).unwrap_or("");
+                if task.is_empty() {
+                    return "ERROR: dispatcher_invoke_agent requires 'task'".into();
+                }
+                let session_id = input.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
+                if session_id.is_empty() {
+                    return "ERROR: dispatcher_invoke_agent requires 'session_id'".into();
+                }
+                let mut args = serde_json::json!({
+                    "domain": domain,
+                    "facet": facet,
+                    "task": task,
+                    "session_id": session_id,
+                });
+                if let Some(ctx) = input.get("context").and_then(|v| v.as_str()) {
+                    if !ctx.is_empty() {
+                        args["context"] = serde_json::Value::String(ctx.to_string());
+                    }
+                }
+                return self.mcp_call("invoke_agent", args).await;
+            }
+            "amassada_state" => {
+                return match self.client.get(format!("{}/state", self.amassada_url)).send().await {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        if status.is_success() {
+                            body
+                        } else {
+                            format!("ERROR: Amassada returned HTTP {} for /state: {}", status, body)
+                        }
+                    }
+                    Err(e) => format!("ERROR: could not reach Amassada: {}", e),
+                };
+            }
+            "amassada_start_session" => {
+                let goal = input.get("goal").and_then(|v| v.as_str()).unwrap_or("");
+                if goal.is_empty() {
+                    return "ERROR: amassada_start_session requires 'goal'".into();
+                }
+                let canvas_id = input.get("canvas_id").and_then(|v| v.as_str()).unwrap_or("design-session");
+                let body = serde_json::json!({"goal": goal, "canvas_id": canvas_id});
+                return match self.client.post(format!("{}/sessions", self.amassada_url)).json(&body).send().await {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let text = resp.text().await.unwrap_or_default();
+                        if status.is_success() {
+                            format!("Amassada session started (HTTP {}): {}", status.as_u16(), text)
+                        } else {
+                            format!("ERROR: Amassada returned HTTP {} for /sessions: {}", status, text)
+                        }
+                    }
+                    Err(e) => format!("ERROR: could not reach Amassada: {}", e),
+                };
             }
             other => return format!("ERROR: unknown tool '{}'", other),
         };
@@ -271,6 +451,8 @@ mod tests {
             "claude-sonnet-4-6".into(),
             "occitane.guilhem".into(),
             "http://farga:7500/".into(),
+            "http://dispatcher:9090/mcp".into(),
+            "http://amassada:7700".into(),
         )
     }
 
@@ -298,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_set_is_three_reads_plus_chronicle_write() {
+    fn tool_set_has_farga_plus_dispatcher_plus_amassada() {
         let names: Vec<String> = Responder::tools()
             .as_array()
             .unwrap()
@@ -311,7 +493,12 @@ mod tests {
                 "farga_recent_signals",
                 "farga_project_context",
                 "farga_org_context",
-                "farga_post_chronicle"
+                "farga_post_chronicle",
+                "dispatcher_list_agent_specs",
+                "dispatcher_get_agent_result",
+                "amassada_state",
+                "dispatcher_invoke_agent",
+                "amassada_start_session",
             ]
         );
     }
@@ -338,5 +525,17 @@ mod tests {
         // constructed with a trailing slash above; the tool URL must not double up.
         // (white-box: build a URL the way execute_tool does)
         assert!(!r.farga_url.ends_with('/'));
+    }
+
+    #[tokio::test]
+    async fn dispatcher_get_agent_result_missing_job_id_returns_error() {
+        let r = responder();
+        let out = r
+            .execute_tool(
+                "dispatcher_get_agent_result",
+                &serde_json::json!({"session_id": "s1"}),
+            )
+            .await;
+        assert!(out.starts_with("ERROR:") && out.contains("job_id"));
     }
 }
