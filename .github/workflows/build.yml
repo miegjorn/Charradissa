@@ -20,9 +20,9 @@ jobs:
       # Check it out as a named build context so the relative path resolves.
       - uses: actions/checkout@v4
         with:
-          repository: occitan/Amassada
+          repository: miegjorn/Amassada
           path: amassada-src
-          token: ${{ secrets.OCCITAN_CI_TOKEN }}
+          token: ${{ secrets.MIEGJORN_CI_TOKEN }}
 
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -34,7 +34,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/occitan/charradissa
+          images: ghcr.io/miegjorn/charradissa
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,prefix=sha-,format=short
@@ -54,15 +54,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          repository: occitan/Caissa
-          token: ${{ secrets.OCCITAN_CI_TOKEN }}
+          repository: miegjorn/Caissa
+          token: ${{ secrets.MIEGJORN_CI_TOKEN }}
           ref: main
       - uses: mikefarah/yq@v4
       - name: Bump image tag
         run: |
           export TAG="sha-${GITHUB_SHA:0:7}"
           yq -i '.charradissa.imageTag = env(TAG)' deploy/charts/occitan/values.yaml
-          git config user.email "ci@occitan.dev"
+          git config user.email "ci@miegjorn.dev"
           git config user.name "Occitan CI"
           git add deploy/charts/occitan/values.yaml
           git diff --staged --quiet && echo "no-op" || \
