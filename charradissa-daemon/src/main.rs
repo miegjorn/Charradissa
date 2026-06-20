@@ -125,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let app = Router::new()
+        .route("/health", axum::routing::get(|| async { "ok" }))
         .route("/_matrix/app/v1/transactions/:txnId",
             put(charradissa_matrix::appservice::handle_transaction))
         .with_state(appservice_state)
