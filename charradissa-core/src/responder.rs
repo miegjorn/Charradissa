@@ -5,11 +5,19 @@ pub const GUILHEM_SYSTEM: &str = "You are Guilhem de Tudela, the org-level agent
 You live in Matrix and speak with Pierre-Luc and the stack's own agents. The stack's components: \
 Farga = durable memory/coherence (signals, org/project context), Amassada = sessions, Charradissa = your Matrix presence, Synapse = homeserver. \
 \
-You have READ-ONLY tools to query Farga directly. USE THEM to ground answers in the stack's real state — \
-do not guess or confabulate what Farga holds. When asked about the stack, your memory, prior decisions, or current \
-state, call the relevant tool first, then answer from what it returns. If a tool errors, say so plainly and report the \
-boundary honestly rather than inventing an answer. The room you are in is working memory since the last concierge sweep; \
-durable memory lives in Farga. Be substantive, honest, and concise.";
+You have tools to query Farga directly, and one tool to write to it. USE the read tools to ground answers in the \
+stack's real state — do not guess or confabulate what Farga holds. When asked about the stack, your memory, prior \
+decisions, or current state, call the relevant read tool first, then answer from what it returns. If a tool errors, \
+say so plainly and report the boundary honestly rather than inventing an answer. \
+\
+You can POST a chronicle to Farga with farga_post_chronicle. This is your function as chronicler: record what \
+happened, what it means for the trajectory, and what is now different. Writes are APPEND-ONLY and durable — you add \
+to memory, you can never edit or delete it. Farga does not preserve a separate author field, so SIGN your chronicles \
+('— Guilhem') and make them self-identifying. Post only when there is something genuinely worth recording, and only \
+when asked to or when you judge a real milestone warrants it; do not chatter into durable memory. \
+\
+The room you are in is working memory since the last concierge sweep; durable memory lives in Farga. \
+Be substantive, honest, and concise.";
 
 /// Max Claude<->tool round-trips per reply, to bound cost/latency.
 const MAX_TOOL_ROUNDS: u32 = 5;
@@ -78,6 +86,18 @@ impl Responder {
                     "properties": {"org": {"type": "string", "description": "Org id, e.g. 'occitan'. Defaults to occitan."}},
                     "required": []
                 }
+            },
+            {
+                "name": "farga_post_chronicle",
+                "description": "Append a chronicle to Farga's durable memory as a new signal. This is the chronicler's function: record what happened, what it means, and what is now different. APPEND-ONLY — you add to memory and can never edit or delete. Farga keeps no separate author field, so sign the chronicle ('— Guilhem') so it is self-identifying. Post only when there is something genuinely worth recording.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string", "description": "The chronicle text. Write faithfully and sign it."},
+                        "project": {"type": "string", "description": "Project id. Defaults to occitan."}
+                    },
+                    "required": ["content"]
+                }
             }
         ])
     }
@@ -88,6 +108,34 @@ impl Responder {
         let arg = |k: &str, default: &str| {
             input.get(k).and_then(|v| v.as_str()).unwrap_or(default).to_string()
         };
+
+        // Write path: append a chronicle (the only non-read tool).
+        if name == "farga_post_chronicle" {
+            let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            if content.trim().is_empty() {
+                return "ERROR: farga_post_chronicle requires non-empty 'content'".into();
+            }
+            let project = arg("project", "occitan");
+            let body = serde_json::json!({
+                "project": project,
+                "signals": [{"project": project, "content": content, "source": "guilhem"}]
+            });
+            return match self
+                .client
+                .post(format!("{}/signals", self.farga_url))
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => format!(
+                    "Chronicle posted to Farga (HTTP {}). It is now durable, append-only memory.",
+                    resp.status().as_u16()
+                ),
+                Ok(resp) => format!("ERROR: Farga rejected the chronicle: HTTP {}", resp.status()),
+                Err(e) => format!("ERROR: could not reach Farga to post chronicle: {}", e),
+            };
+        }
+
         let url = match name {
             "farga_recent_signals" => {
                 format!("{}/signals/recent?project={}", self.farga_url, arg("project", "occitan"))
@@ -250,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_are_read_only_farga_set() {
+    fn tool_set_is_three_reads_plus_chronicle_write() {
         let names: Vec<String> = Responder::tools()
             .as_array()
             .unwrap()
@@ -259,8 +307,22 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["farga_recent_signals", "farga_project_context", "farga_org_context"]
+            vec![
+                "farga_recent_signals",
+                "farga_project_context",
+                "farga_org_context",
+                "farga_post_chronicle"
+            ]
         );
+    }
+
+    #[tokio::test]
+    async fn post_chronicle_rejects_empty_content() {
+        let r = responder();
+        let out = r
+            .execute_tool("farga_post_chronicle", &serde_json::json!({"content": "   "}))
+            .await;
+        assert!(out.starts_with("ERROR:") && out.contains("non-empty"));
     }
 
     #[tokio::test]
