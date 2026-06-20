@@ -46,8 +46,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           build-contexts: |
             amassada=./amassada-src
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ github.workflow }}
+          cache-to: type=gha,mode=max,scope=${{ github.workflow }}
 
   update-caissa:
 
