@@ -62,7 +62,7 @@ The heart of the system. Backend-agnostic. Contains:
 
 - **`config`** — `Config` struct and TOML deserialization (`OrgConfig`, `BackendConfig`, `ConciergeConfig`, `ApprovalConfig`, `TasksConfig`, `ProjectsConfig`).
 - **`types`** — Newtype IDs (`RoomId`, `UserId`, `SpaceId`, `ProjectId`, `TaskId`), `CompositionAddress`, `ChatEvent`/`ChatEventKind`, `Task`/`TaskStatus`, `RoomOptions`, `ProjectHealth`.
-- **`backend`** — `ChatBackend` async trait (11 methods).
+- **`backend`** — `ChatBackend` async trait (13 methods, including `join_room`/`joined_rooms` with default no-op impls).
 - **`task`** — `TaskManager` async trait (5 methods).
 - **`farga`** — `FargaWriter` async trait + `HttpFargaWriter` implementation for publishing signals to Farga over HTTP.
 - **`transport`** — `CharradissaTransport`: implements `amassada_core::Transport` for Matrix rooms.
@@ -225,6 +225,7 @@ Slash commands are parsed by `parse_slash_command()` in `charradissa-core/src/to
 | `/approve` | `/approve <id>` | `ProjectAgent` | Resolves the named pending approval with `Approved` |
 | `/reject` | `/reject <id> [reason]` | `ProjectAgent` | Resolves the named pending approval with `Rejected(reason)` |
 | `/session` | `/session <canvas_id> "<goal>"` | `ProjectAgent` | Initiates an Amassada session for the given canvas and goal |
+| `/mission` | `/mission <budget_tokens> <goal>` | `ProjectAgent` | Runs a full `amassada_core::mission::engine::MissionEngine` with the given token budget and goal, submitting to Farga on a `FargaVerdict::Submit` outcome |
 | `/invite` | `/invite <address>` | `ProjectAgent` | Provisions a specialist from a `CompositionAddress` string and invites it to the main room |
 | `/call` | `/call` | (reserved) | Initiates a voice/video consultation (future) |
 
@@ -281,6 +282,7 @@ Charradissa is configured via a TOML file (default: `charradissa.toml`, overridd
 [org]
 name        = "acme"                         # Organisation slug; used in Matrix IDs and room aliases
 homeserver  = "https://matrix.acme.internal" # Matrix homeserver base URL
+server_name = "occitane.guilhem"             # Matrix server name used to build the bot's user ID (default: "occitane.guilhem")
 
 [backend]
 type = "matrix"   # Currently only "matrix" is implemented; "irc" is planned
@@ -315,7 +317,8 @@ All fields have documented defaults; the only required fields are `org.name`, `o
 | `CHARRADISSA_PORT` | `8448` | Port the daemon's Appservice webhook HTTP server listens on |
 | `JIRA_API_TOKEN` | — | Jira API token for `JiraTaskManager` auth |
 | `JIRA_EMAIL` | — | Atlassian account email for Jira Basic auth |
-| `FARGA_BASE_URL` | — | Base URL of the Farga HTTP API for signal writes |
+| `FARGA_URL` | `http://farga:7500` | Base URL of the Farga HTTP API for signal writes |
+| `GUILHEM_URL` | `http://guilhem.agents.svc.cluster.local:8080` | Base URL of the Guilhem pod's `/matrix/reply` endpoint |
 | `RUST_LOG` | — | Log filter (e.g. `charradissa=debug,info`) via `tracing-subscriber` |
 
 ---
@@ -407,11 +410,11 @@ as a sibling of this repo. The builder uses `rust:1.90-slim`:
 ```sh
 # run from the parent directory that holds both repos
 docker build --build-context amassada=./Amassada \
-  -t ghcr.io/occitan/charradissa:latest ./Charradissa
+  -t ghcr.io/miegjorn/charradissa:latest ./Charradissa
 ```
 
 For local kind deployment, load it in afterwards:
-`kind load docker-image ghcr.io/occitan/charradissa:latest --name occitan`.
+`kind load docker-image ghcr.io/miegjorn/charradissa:latest --name occitan`.
 See `Caissa/docs/install.md` (step 3e) for the full stack.
 
 > **Architecture**: Charradissa is the Matrix transport layer only. When a message arrives,
@@ -421,6 +424,12 @@ See `Caissa/docs/install.md` (step 3e) for the full stack.
 > full persona, Farga MCP, and `Bash` (giving access to `gh`, `glab`, `git`), then returns
 > the reply text. Charradissa posts it back to Matrix. `responder.rs` is retained for
 > reference and its tests, but is no longer in the production reply path.
+>
+> **Retry and fallback**: if the call to Guilhem fails (network error, timeout, or a
+> non-2xx/unparseable response), `handle_transaction` retries up to 3 attempts total
+> with a 5-second delay between attempts. If all attempts fail, Charradissa posts a
+> fallback message to the room ("Guilhem is unreachable right now — please try again
+> in a moment.") instead of silently dropping the event.
 
 ### Run
 
