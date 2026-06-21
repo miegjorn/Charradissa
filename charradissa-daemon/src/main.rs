@@ -102,11 +102,16 @@ async fn main() -> anyhow::Result<()> {
     let queue_state = queue_api::QueueState { queue: Arc::clone(&persistent_queue) };
 
     let appservice_port = std::env::var("CHARRADISSA_PORT").unwrap_or("8448".into());
-    let guilhem_url = std::env::var("GUILHEM_URL")
-        .unwrap_or_else(|_| "http://guilhem.agents.svc.cluster.local:8080".into());
+
+    // Default agent URL: prefer [agents].default in config, fall back to GUILHEM_URL env var.
+    let default_agent_url = config.agents.default.clone()
+        .or_else(|| std::env::var("GUILHEM_URL").ok())
+        .unwrap_or_else(|| "http://guilhem.agents.svc.cluster.local:8080".into());
+
     let appservice_state = AppserviceState {
         hs_token: as_token.clone(),
-        guilhem_url,
+        default_agent_url,
+        agent_routes: config.agents.routes.clone(),
         backend: Arc::clone(&backend) as Arc<dyn charradissa_core::backend::ChatBackend>,
         self_user_id: bot_user_id.clone(),
     };

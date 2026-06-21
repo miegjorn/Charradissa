@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -8,6 +9,8 @@ pub struct Config {
     pub approval: ApprovalConfig,
     pub tasks: TasksConfig,
     pub projects: ProjectsConfig,
+    #[serde(default)]
+    pub agents: AgentsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -63,6 +66,28 @@ pub struct ProjectsConfig {
 }
 
 fn default_true() -> bool { true }
+
+/// Per-room agent routing.  All rooms fall back to `default` (or the
+/// GUILHEM_URL env var) when no explicit route is set.  Routes are keyed by
+/// Matrix room ID (`!<opaque>:<server>`).
+///
+/// Example charradissa.toml fragment:
+/// ```toml
+/// [agents]
+/// default = "http://guilhem.agents.svc.cluster.local:8080"
+///
+/// [agents.routes]
+/// "!abc123:occitane.guilhem" = "http://amassada-agent.agents.svc.cluster.local:8080"
+/// "!def456:occitane.guilhem" = "http://farga-agent.agents.svc.cluster.local:8080"
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct AgentsConfig {
+    /// Fallback agent URL.  If absent, GUILHEM_URL env var is used.
+    pub default: Option<String>,
+    /// room_id → agent URL overrides.
+    #[serde(default)]
+    pub routes: HashMap<String, String>,
+}
 
 impl Config {
     pub fn from_file(path: &str) -> anyhow::Result<Self> {
