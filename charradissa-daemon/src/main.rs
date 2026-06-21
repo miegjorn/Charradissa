@@ -12,6 +12,7 @@ use charradissa_core::farcaster::ClaudeFarcasterAnalyzer;
 use charradissa_core::farga::HttpFargaWriter;
 use charradissa_matrix::backend::MatrixBackend;
 use charradissa_matrix::appservice::AppserviceState;
+use charradissa_core::responder::Responder;
 use axum::{routing::put, Router};
 use charradissa_core::approval::PersistentApprovalQueue;
 
@@ -61,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
     concierge.register_system_agent(
         Box::new(FarcasterAgent::new(
             Arc::clone(&backend) as Arc<dyn charradissa_core::backend::ChatBackend>,
-            Arc::new(HttpFargaWriter::new(farga_base_url)),
+            Arc::new(HttpFargaWriter::new(farga_base_url.clone())),
             Arc::new(ClaudeFarcasterAnalyzer::new(anthropic_api_key.clone())),
             vec![], // projects populated from config in a future task
             HashMap::new(),
@@ -108,12 +109,34 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|| std::env::var("GUILHEM_URL").ok())
         .unwrap_or_else(|| "http://guilhem.agents.svc.cluster.local:8080".into());
 
+    // Build component agent responders from config (room_id → Responder).
+    let mut component_agents = HashMap::new();
+    for ca in &config.component_agents {
+        if ca.room_id.is_empty() {
+            tracing::warn!("component agent '{}' has no room_id configured, skipping", ca.name);
+            continue;
+        }
+        let responder = Arc::new(Responder::with_config(
+            anthropic_api_key.clone(),
+            "claude-sonnet-4-6".into(),
+            server_name.clone(),
+            farga_base_url.clone(),
+            std::env::var("DISPATCHER_URL").unwrap_or_else(|_| "http://dispatcher.agents.svc.cluster.local:9090/mcp".into()),
+            std::env::var("AMASSADA_URL").unwrap_or_else(|_| "http://amassada:7700".into()),
+            ca.system_prompt.clone(),
+            false, // component agents do not get org-level tools
+        ));
+        tracing::info!("registered component agent '{}' for room {}", ca.name, ca.room_id);
+        component_agents.insert(ca.room_id.clone(), responder);
+    }
+
     let appservice_state = AppserviceState {
         hs_token: as_token.clone(),
         default_agent_url,
         agent_routes: config.agents.routes.clone(),
         backend: Arc::clone(&backend) as Arc<dyn charradissa_core::backend::ChatBackend>,
         self_user_id: bot_user_id.clone(),
+        component_agents,
     };
 
     let app = Router::new()
