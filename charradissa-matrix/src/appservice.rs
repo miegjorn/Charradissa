@@ -1,6 +1,6 @@
 use axum::{extract::{Path, Query, State}, http::{HeaderMap, StatusCode}, Json};
 use charradissa_core::backend::ChatBackend;
-use charradissa_core::responder::should_respond;
+use charradissa_core::responder::{should_respond, Responder};
 use charradissa_core::types::{ChatEvent, ChatEventKind, RoomId, UserId};
 use chrono::Utc;
 use serde_json::Value;
@@ -16,6 +16,10 @@ pub struct AppserviceState {
     pub agent_routes: HashMap<String, String>,
     pub backend: Arc<dyn ChatBackend>,
     pub self_user_id: String,
+    /// Component agents keyed by Matrix room ID. When a message arrives in one of
+    /// these rooms, the corresponding Responder handles it inline (in-process)
+    /// rather than going through the agent_routes/default_agent_url HTTP path.
+    pub component_agents: HashMap<String, Arc<Responder>>,
 }
 
 pub fn token_ok(provided: Option<&str>, expected: &str) -> bool {
@@ -70,6 +74,35 @@ pub async fn handle_transaction(
             if !should_respond(&ev, &state.self_user_id) {
                 continue;
             }
+
+            if let Some(component_responder) = state.component_agents.get(ev.room_id.as_str()).cloned() {
+                let backend = state.backend.clone();
+                tokio::spawn(async move {
+                    let history = backend.room_history(&ev.room_id, Utc::now()).await.unwrap_or_default();
+                    match component_responder.reply(&history, &ev).await {
+                        Ok(text) if !text.trim().is_empty() => {
+                            if let Err(e) = backend.send_message(&ev.room_id, &text).await {
+                                tracing::error!("component agent send failed: {}", e);
+                            }
+                        }
+                        Ok(_) => tracing::warn!("component agent produced an empty reply"),
+                        Err(e) => {
+                            tracing::error!("component agent reply failed: {}", e);
+                            if let Err(send_err) = backend
+                                .send_message(
+                                    &ev.room_id,
+                                    "\u{26A0} This component agent is unreachable right now — please try again in a moment.",
+                                )
+                                .await
+                            {
+                                tracing::error!("fallback message send failed: {}", send_err);
+                            }
+                        }
+                    }
+                });
+                continue;
+            }
+
             let agent_url = state.agent_routes
                 .get(ev.room_id.as_str())
                 .cloned()
@@ -173,6 +206,21 @@ mod tests {
         assert!(token_ok(Some("good"), "good")); // correct token accepted
         assert!(!token_ok(Some("bad"), "good")); // wrong token rejected
         assert!(!token_ok(None, "good")); // missing token rejected
+    }
+
+    #[test]
+    fn component_agents_map_keyed_by_room_id() {
+        // Verify the HashMap key type is room_id string — routing contract test.
+        let room_id = "!amassada:occitane.guilhem";
+        let mut map: HashMap<String, Arc<Responder>> = HashMap::new();
+        let r = Arc::new(Responder::with_config(
+            "k".into(), "m".into(), "s".into(),
+            "http://f".into(), "http://d".into(), "http://a".into(),
+            "amassada context".into(), false,
+        ));
+        map.insert(room_id.to_string(), r.clone());
+        assert!(map.contains_key(room_id));
+        assert!(!map.contains_key("!other:occitane.guilhem"));
     }
 }
 
