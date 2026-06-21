@@ -4,14 +4,16 @@ use charradissa_core::responder::should_respond;
 use charradissa_core::types::{ChatEvent, ChatEventKind, RoomId, UserId};
 use chrono::Utc;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct AppserviceState {
     pub hs_token: String,
-    /// URL of the Guilhem pod's listen server — the actual brain.
-    /// Charradissa is transport; Guilhem generates all replies.
-    pub guilhem_url: String,
+    /// Default agent URL — receives messages for rooms without an explicit route.
+    pub default_agent_url: String,
+    /// Per-room overrides: room_id → agent URL.
+    pub agent_routes: HashMap<String, String>,
     pub backend: Arc<dyn ChatBackend>,
     pub self_user_id: String,
 }
@@ -68,7 +70,11 @@ pub async fn handle_transaction(
             if !should_respond(&ev, &state.self_user_id) {
                 continue;
             }
-            let (guilhem_url, backend) = (state.guilhem_url.clone(), state.backend.clone());
+            let agent_url = state.agent_routes
+                .get(ev.room_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| state.default_agent_url.clone());
+            let (agent_url, backend) = (agent_url, state.backend.clone());
             tokio::spawn(async move {
                 let history = backend
                     .room_history(&ev.room_id, Utc::now())
@@ -78,28 +84,28 @@ pub async fn handle_transaction(
                 const MAX_ATTEMPTS: u32 = 3;
                 const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
-                let mut result = call_guilhem(&guilhem_url, &history, &ev).await;
+                let mut result = call_agent(&agent_url, &history, &ev).await;
                 let mut attempt = 1;
                 while result.is_err() && attempt < MAX_ATTEMPTS {
                     tracing::warn!(
-                        "guilhem reply attempt {} failed: {}; retrying",
+                        "agent reply attempt {} failed: {}; retrying",
                         attempt,
                         result.as_ref().unwrap_err()
                     );
                     tokio::time::sleep(RETRY_DELAY).await;
-                    result = call_guilhem(&guilhem_url, &history, &ev).await;
+                    result = call_agent(&agent_url, &history, &ev).await;
                     attempt += 1;
                 }
 
                 match result {
                     Ok(text) if !text.trim().is_empty() => {
                         if let Err(e) = backend.send_message(&ev.room_id, &text).await {
-                            tracing::error!("guilhem send failed: {}", e);
+                            tracing::error!("agent send failed: {}", e);
                         }
                     }
-                    Ok(_) => tracing::warn!("guilhem produced an empty reply"),
+                    Ok(_) => tracing::warn!("agent produced an empty reply"),
                     Err(e) => {
-                        tracing::error!("guilhem reply failed after {} attempts: {}", MAX_ATTEMPTS, e);
+                        tracing::error!("agent reply failed after {} attempts: {}", MAX_ATTEMPTS, e);
                         if let Err(send_err) = backend
                             .send_message(
                                 &ev.room_id,
@@ -117,7 +123,7 @@ pub async fn handle_transaction(
     (StatusCode::OK, ack())
 }
 
-async fn call_guilhem(guilhem_url: &str, history: &[ChatEvent], ev: &ChatEvent) -> Result<String, String> {
+async fn call_agent(agent_url: &str, history: &[ChatEvent], ev: &ChatEvent) -> Result<String, String> {
     #[derive(serde::Serialize)]
     struct HistoryEntry<'a> {
         sender: &'a str,
@@ -146,7 +152,7 @@ async fn call_guilhem(guilhem_url: &str, history: &[ChatEvent], ev: &ChatEvent) 
     };
 
     reqwest::Client::new()
-        .post(format!("{}/matrix/reply", guilhem_url))
+        .post(format!("{}/matrix/reply", agent_url))
         .timeout(std::time::Duration::from_secs(300))
         .json(&req)
         .send()
