@@ -1,5 +1,15 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ComponentAgentConfig {
+    /// Component name, e.g. "amassada". Used as a display label.
+    pub name: String,
+    /// The Matrix room ID this agent inhabits, e.g. "!abc123:occitane.guilhem".
+    pub room_id: String,
+    /// System prompt for this agent. Use the context field from its Fondament definition.
+    pub system_prompt: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub org: OrgConfig,
@@ -8,6 +18,8 @@ pub struct Config {
     pub approval: ApprovalConfig,
     pub tasks: TasksConfig,
     pub projects: ProjectsConfig,
+    #[serde(default)]
+    pub component_agents: Vec<ComponentAgentConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

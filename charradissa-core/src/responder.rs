@@ -43,10 +43,20 @@ pub struct Responder {
     farga_url: String,
     dispatcher_url: String,
     amassada_url: String,
+    /// System prompt injected into every Claude call. Guilhem uses GUILHEM_SYSTEM;
+    /// component agents use their Fondament definition's context field.
+    system_prompt: String,
+    /// Org agents (Guilhem) get the full tool set including dispatcher and dispatch.
+    /// Component agents get only the Farga tools.
+    is_org_agent: bool,
 }
 
 impl Responder {
     pub fn new(api_key: String, model: String, server_name: String, farga_url: String, dispatcher_url: String, amassada_url: String) -> Self {
+        Self::with_config(api_key, model, server_name, farga_url, dispatcher_url, amassada_url, GUILHEM_SYSTEM.to_string(), true)
+    }
+
+    pub fn with_config(api_key: String, model: String, server_name: String, farga_url: String, dispatcher_url: String, amassada_url: String, system_prompt: String, is_org_agent: bool) -> Self {
         Self {
             client: reqwest::Client::new(),
             api_key,
@@ -55,6 +65,8 @@ impl Responder {
             farga_url: farga_url.trim_end_matches('/').to_string(),
             dispatcher_url: dispatcher_url.trim_end_matches('/').to_string(),
             amassada_url: amassada_url.trim_end_matches('/').to_string(),
+            system_prompt,
+            is_org_agent,
         }
     }
 
@@ -99,8 +111,42 @@ impl Responder {
         s
     }
 
-    /// The read-only tool definitions exposed to Claude. All map to Farga GET endpoints.
-    pub fn tools() -> serde_json::Value {
+    /// The tool definitions exposed to Claude. Org agents get the full set; component agents
+    /// get only the Farga tools (no dispatcher, no dispatch to other components).
+    pub fn tools(&self) -> serde_json::Value {
+        if !self.is_org_agent {
+            return self.component_tools();
+        }
+        self.org_tools()
+    }
+
+    fn component_tools(&self) -> serde_json::Value {
+        serde_json::json!([
+            {
+                "name": "farga_recent_signals",
+                "description": "Read recent signals from Farga for a project (chronicles, decisions, blockers).",
+                "input_schema": {"type": "object", "properties": {"project": {"type": "string", "description": "Project id, e.g. 'occitan'."}}, "required": []}
+            },
+            {
+                "name": "farga_project_context",
+                "description": "Read the durable context document for a project from Farga.",
+                "input_schema": {"type": "object", "properties": {"project": {"type": "string", "description": "Project id, e.g. 'occitan'."}}, "required": []}
+            },
+            {
+                "name": "farga_org_context",
+                "description": "Read the durable org-level context from Farga.",
+                "input_schema": {"type": "object", "properties": {"org": {"type": "string", "description": "Org id, e.g. 'occitan'."}}, "required": []}
+            },
+            {
+                "name": "farga_post_chronicle",
+                "description": "Append a chronicle to Farga's durable memory. APPEND-ONLY — sign it with your component name.",
+                "input_schema": {"type": "object", "properties": {"content": {"type": "string"}, "project": {"type": "string"}}, "required": ["content"]},
+                "cache_control": {"type": "ephemeral"}
+            }
+        ])
+    }
+
+    fn org_tools(&self) -> serde_json::Value {
         serde_json::json!([
             {
                 "name": "farga_recent_signals",
@@ -365,8 +411,8 @@ impl Responder {
                 // system as array-of-blocks: cache_control on the sole block caches the
                 // entire ~508-token system prompt. Combined with the tools breakpoint
                 // this gives ~1566 cached tokens per round.
-                "system": [{"type": "text", "text": GUILHEM_SYSTEM, "cache_control": {"type": "ephemeral"}}],
-                "tools": Self::tools(),
+                "system": [{"type": "text", "text": &self.system_prompt, "cache_control": {"type": "ephemeral"}}],
+                "tools": self.tools(),
                 "messages": messages,
             });
 
@@ -487,8 +533,9 @@ mod tests {
     }
 
     #[test]
-    fn tool_set_has_farga_plus_dispatcher_plus_amassada() {
-        let names: Vec<String> = Responder::tools()
+    fn org_tool_set_has_farga_plus_dispatcher_plus_amassada() {
+        let r = responder(); // is_org_agent=true
+        let names: Vec<String> = r.tools()
             .as_array()
             .unwrap()
             .iter()
@@ -508,6 +555,22 @@ mod tests {
                 "amassada_start_session",
             ]
         );
+    }
+
+    #[test]
+    fn component_tool_set_has_only_farga_tools() {
+        let r = Responder::with_config(
+            "k".into(), "claude-sonnet-4-6".into(), "occitane.guilhem".into(),
+            "http://farga:7500/".into(), "http://dispatcher:9090/mcp".into(),
+            "http://amassada:7700".into(), "You are the amassada agent.".into(), false,
+        );
+        let names: Vec<String> = r.tools()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, vec!["farga_recent_signals", "farga_project_context", "farga_org_context", "farga_post_chronicle"]);
     }
 
     #[tokio::test]

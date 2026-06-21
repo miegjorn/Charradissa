@@ -20,3 +20,15 @@ project_key = "PROJ"
 
 [projects]
 autodiscover = true
+
+# Component agents run inline (no external pod). Each section maps a Matrix room
+# to an agent whose system prompt is its Fondament component-agent definition.
+# Add one [[component_agents]] block per component room after creating the rooms.
+#
+# [[component_agents]]
+# name = "amassada"
+# room_id = "!<opaque-id>:occitane.guilhem"  # set after creating the room in Element
+# system_prompt = """
+# You are the Amassada component agent...
+# (paste context field from definitions/fondament/amassada-agent.yaml)
+# """
