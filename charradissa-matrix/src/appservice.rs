@@ -74,14 +74,42 @@ pub async fn handle_transaction(
                     .room_history(&ev.room_id, Utc::now())
                     .await
                     .unwrap_or_default();
-                match call_guilhem(&guilhem_url, &history, &ev).await {
+
+                const MAX_ATTEMPTS: u32 = 3;
+                const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+
+                let mut result = call_guilhem(&guilhem_url, &history, &ev).await;
+                let mut attempt = 1;
+                while result.is_err() && attempt < MAX_ATTEMPTS {
+                    tracing::warn!(
+                        "guilhem reply attempt {} failed: {}; retrying",
+                        attempt,
+                        result.as_ref().unwrap_err()
+                    );
+                    tokio::time::sleep(RETRY_DELAY).await;
+                    result = call_guilhem(&guilhem_url, &history, &ev).await;
+                    attempt += 1;
+                }
+
+                match result {
                     Ok(text) if !text.trim().is_empty() => {
                         if let Err(e) = backend.send_message(&ev.room_id, &text).await {
                             tracing::error!("guilhem send failed: {}", e);
                         }
                     }
                     Ok(_) => tracing::warn!("guilhem produced an empty reply"),
-                    Err(e) => tracing::error!("guilhem reply failed: {}", e),
+                    Err(e) => {
+                        tracing::error!("guilhem reply failed after {} attempts: {}", MAX_ATTEMPTS, e);
+                        if let Err(send_err) = backend
+                            .send_message(
+                                &ev.room_id,
+                                "\u{26A0} Guilhem is unreachable right now — please try again in a moment.",
+                            )
+                            .await
+                        {
+                            tracing::error!("fallback message send failed: {}", send_err);
+                        }
+                    }
                 }
             });
         }
