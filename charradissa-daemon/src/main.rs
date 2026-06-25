@@ -25,6 +25,14 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_file(&config_path)
         .map_err(|e| anyhow::anyhow!("config error: {}", e))?;
 
+    // `charradissa-daemon --generate-registration` prints the Synapse appservice
+    // registration YAML to stdout and exits. This is the source of truth for the
+    // file Synapse loads from /data/charradissa-registration.yaml.
+    if std::env::args().any(|a| a == "--generate-registration") {
+        print!("{}", build_registration(&config));
+        return Ok(());
+    }
+
     let as_token = std::env::var("MATRIX_AS_TOKEN")
         .unwrap_or_else(|_| "dev-token".into());
     let server_name = config.org.server_name.clone();
@@ -102,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
     let persistent_queue = Arc::new(PersistentApprovalQueue::new(queue_file.into()));
     let queue_state = queue_api::QueueState { queue: Arc::clone(&persistent_queue) };
 
-    let appservice_port = std::env::var("CHARRADISSA_PORT").unwrap_or("8448".into());
+    let appservice_port = charradissa_core::config::listen_port();
 
     // Default agent URL: prefer [agents].default in config, fall back to GUILHEM_URL env var.
     let default_agent_url = config.agents.default.clone()
@@ -157,4 +165,31 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("charradissa-daemon webhook listening on :{}", appservice_port);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Build the Synapse appservice registration YAML from config and environment.
+///
+/// Tokens come from `MATRIX_AS_TOKEN` / `MATRIX_HS_TOKEN`; the callback URL from
+/// `CHARRADISSA_URL` (defaulting to the in-cluster Service URL). The user
+/// namespace grants each of the seven component agents its own Matrix identity.
+fn build_registration(config: &Config) -> String {
+    use charradissa_core::registration::{
+        generate_registration, RegistrationParams, COMPONENT_AGENT_LOCALPARTS,
+    };
+
+    let listen_port = charradissa_core::config::listen_port();
+    let params = RegistrationParams {
+        id: "charradissa".into(),
+        url: std::env::var("CHARRADISSA_URL")
+            .unwrap_or_else(|_| format!("http://charradissa:{listen_port}")),
+        as_token: std::env::var("MATRIX_AS_TOKEN").unwrap_or_else(|_| "dev-token".into()),
+        hs_token: std::env::var("MATRIX_HS_TOKEN").unwrap_or_else(|_| "dev-hs-token".into()),
+        sender_localpart: "charradissa".into(),
+        server_name: config.org.server_name.clone(),
+        component_localparts: COMPONENT_AGENT_LOCALPARTS
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    };
+    generate_registration(&params)
 }

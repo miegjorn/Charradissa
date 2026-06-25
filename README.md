@@ -100,7 +100,7 @@ The runnable binary (`charradissa-daemon`). Entry point:
 2. Reads `MATRIX_AS_TOKEN` for the appservice token.
 3. Constructs `MatrixBackend`.
 4. Initialises an `AgentRegistry` (maps `ProjectId` → `UserId`, tracks org agent and concierge).
-5. Binds an Axum HTTP server on `CHARRADISSA_PORT` (default: `8448`) and serves the Matrix Appservice webhook.
+5. Binds an Axum HTTP server on `CHARRADISSA_LISTEN_PORT` (default: `8448`) and serves the Matrix Appservice webhook.
 
 The `AgentRegistry` in `charradissa-daemon/src/registry.rs` is an in-process map maintained by the daemon for the lifetime of the process.
 
@@ -314,7 +314,9 @@ All fields have documented defaults; the only required fields are `org.name`, `o
 |---|---|---|
 | `CHARRADISSA_CONFIG` | `charradissa.toml` | Path to the TOML config file |
 | `MATRIX_AS_TOKEN` | `dev-token` | Matrix Appservice token (`as_token` in the registration YAML) |
-| `CHARRADISSA_PORT` | `8448` | Port the daemon's Appservice webhook HTTP server listens on |
+| `MATRIX_HS_TOKEN` | `dev-hs-token` | Homeserver token (`hs_token` in the registration YAML); only read by `--generate-registration` |
+| `CHARRADISSA_LISTEN_PORT` | `8448` | Port the daemon's Appservice webhook HTTP server listens on. Renamed from `CHARRADISSA_PORT` to avoid the kubelet service-link collision (issue #10) |
+| `CHARRADISSA_URL` | `http://charradissa:<port>` | Callback URL Synapse posts transactions to (`url:` in the registration YAML); only read by `--generate-registration` |
 | `JIRA_API_TOKEN` | — | Jira API token for `JiraTaskManager` auth |
 | `JIRA_EMAIL` | — | Atlassian account email for Jira Basic auth |
 | `FARGA_URL` | `http://farga:7500` | Base URL of the Farga HTTP API for signal writes |
@@ -331,23 +333,62 @@ The appservice is fully wired in the local kind cluster: charradissa runs at `1/
 
 ### Registration YAML (register with your homeserver)
 
+Generate the registration with the daemon rather than writing it by hand — this
+is the source of truth for the file Synapse loads:
+
+```sh
+MATRIX_AS_TOKEN=<as-token> MATRIX_HS_TOKEN=<hs-token> \
+  charradissa-daemon --generate-registration > charradissa-registration.yaml
+```
+
+The generated file looks like:
+
 ```yaml
 id: charradissa
-url: http://<daemon-host>:8448
+url: http://charradissa:8448
 as_token: <MATRIX_AS_TOKEN>
-hs_token: <homeserver-token>
+hs_token: <MATRIX_HS_TOKEN>
 sender_localpart: charradissa
 namespaces:
   users:
     - exclusive: true
+      regex: '@charradissa:occitane\.guilhem'
+    - exclusive: true
       regex: '@charradissa-.*'
+    - exclusive: true
+      regex: '@gardian:occitane\.guilhem'
+    - exclusive: true
+      regex: '@fondament:occitane\.guilhem'
+    - exclusive: true
+      regex: '@farga:occitane\.guilhem'
+    - exclusive: true
+      regex: '@amassada:occitane\.guilhem'
+    - exclusive: true
+      regex: '@cor:occitane\.guilhem'
+    - exclusive: true
+      regex: '@caissa:occitane\.guilhem'
+    - exclusive: true
+      regex: '@charradissa-agent:occitane\.guilhem'
   rooms: []
   aliases: []
 ```
 
-- `as_token` must match `MATRIX_AS_TOKEN` in the daemon environment.
+- `as_token` must match `MATRIX_AS_TOKEN` in the daemon environment; `hs_token`
+  comes from `MATRIX_HS_TOKEN`. The callback `url` is taken from `CHARRADISSA_URL`
+  (default `http://charradissa:<CHARRADISSA_LISTEN_PORT>`), and the server name in
+  the regexes from `org.server_name` in the TOML config.
 - `hs_token` is sent by the homeserver in the `Authorization` header on incoming requests; the daemon validates it via `AppserviceState.hs_token`.
-- The `@charradissa-.*` namespace covers all specialist virtual users. Persistent agents (`@org.*`, `@project.*`, `@concierge`) may require additional namespace entries or separate appservice registrations.
+- The `@charradissa-.*` namespace covers all specialist virtual users.
+- The seven component agents (`@gardian`, `@fondament`, `@farga`, `@amassada`,
+  `@cor`, `@caissa`, `@charradissa-agent`) each get an exclusive entry so they can
+  respond as their own Matrix identity rather than as `@charradissa`. The set is
+  defined by `COMPONENT_AGENT_LOCALPARTS` in `charradissa-core/src/registration.rs`.
+- Persistent agents (`@org.*`, `@project.*`, `@concierge`) may require additional namespace entries or separate appservice registrations.
+
+> **Deploying a namespace change:** Synapse reads this file once at startup from
+> its data PVC (`/data/charradissa-registration.yaml`). After regenerating it,
+> replace the file on the PVC and restart **both** Synapse and Charradissa (the
+> `as_token`/`hs_token` must stay in sync across the two).
 
 ### Webhook Endpoint
 
