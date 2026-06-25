@@ -107,3 +107,19 @@ impl Config {
         Ok(toml::from_str(&content)?)
     }
 }
+
+/// Default appservice webhook listen port.
+pub const DEFAULT_LISTEN_PORT: &str = "8448";
+
+/// Resolve the daemon's appservice webhook listen port from the environment.
+///
+/// Reads `CHARRADISSA_LISTEN_PORT`, falling back to [`DEFAULT_LISTEN_PORT`].
+///
+/// This variable is deliberately *not* named `CHARRADISSA_PORT`: the kubelet
+/// injects a legacy service-link variable `CHARRADISSA_PORT=tcp://<ip>:<port>`
+/// for the in-cluster `charradissa` Service, which collided with the daemon's
+/// own port config (issue #10). The rename lets us drop the
+/// `enableServiceLinks: false` workaround from the Helm chart.
+pub fn listen_port() -> String {
+    std::env::var("CHARRADISSA_LISTEN_PORT").unwrap_or_else(|_| DEFAULT_LISTEN_PORT.into())
+}

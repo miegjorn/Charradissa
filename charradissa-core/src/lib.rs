@@ -1,4 +1,5 @@
 pub mod config;
+pub mod registration;
 pub mod error;
 pub mod types;
 pub mod backend;
