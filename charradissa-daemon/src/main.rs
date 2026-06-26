@@ -35,6 +35,7 @@ async fn main() -> anyhow::Result<()> {
 
     let as_token = std::env::var("MATRIX_AS_TOKEN")
         .unwrap_or_else(|_| "dev-token".into());
+    let hs_token = charradissa_core::config::hs_token(&as_token);
     let server_name = config.org.server_name.clone();
     let bot_user_id = format!("@charradissa:{}", server_name);
 
@@ -139,7 +140,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let appservice_state = AppserviceState {
-        hs_token: as_token.clone(),
+        hs_token,
         default_agent_url,
         agent_routes: config.agents.routes.clone(),
         backend: Arc::clone(&backend) as Arc<dyn charradissa_core::backend::ChatBackend>,

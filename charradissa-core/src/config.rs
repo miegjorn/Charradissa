@@ -123,3 +123,11 @@ pub const DEFAULT_LISTEN_PORT: &str = "8448";
 pub fn listen_port() -> String {
     std::env::var("CHARRADISSA_LISTEN_PORT").unwrap_or_else(|_| DEFAULT_LISTEN_PORT.into())
 }
+
+/// Resolve the appservice HS token (the token Synapse sends to Charradissa).
+///
+/// Reads `MATRIX_HS_TOKEN`. If unset, falls back to `as_token` (backward-compat
+/// with deployments that use a single shared token).
+pub fn hs_token(as_token: &str) -> String {
+    std::env::var("MATRIX_HS_TOKEN").unwrap_or_else(|_| as_token.to_string())
+}
