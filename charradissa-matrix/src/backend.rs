@@ -26,6 +26,19 @@ impl MatrixBackend {
         let user_id = self.client.bot_user_id().to_string();
         self.client.set_display_name(&user_id, name).await
     }
+
+    /// Grant kick power (PL 50) to all component agents in every room Charradissa is in.
+    /// Idempotent — rooms where agents already have PL ≥ 50 are left untouched.
+    pub async fn provision_agent_kick_power(&self) -> Result<()> {
+        let rooms = self.client.joined_rooms().await?;
+        tracing::info!("provisioning kick power in {} rooms", rooms.len());
+        for room in &rooms {
+            if let Err(e) = self.client.grant_agent_kick_power(room).await {
+                tracing::warn!("kick power grant failed for {}: {}", room.as_str(), e);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -58,7 +71,7 @@ impl ChatBackend for MatrixBackend {
 
     async fn kick(&self, room: &RoomId, user: &UserId, reason: &str) -> Result<()> {
         tracing::info!("kick {} from {} ({})", user, room, reason);
-        Ok(())
+        self.client.kick_user(room, user, reason).await
     }
 
     async fn register_agent(&self, address: &CompositionAddress) -> Result<UserId> {
