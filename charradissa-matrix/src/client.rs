@@ -2,6 +2,13 @@ use reqwest::Client;
 use charradissa_core::error::{CharradissaError, Result};
 use charradissa_core::types::{RoomId, UserId};
 
+/// Component agent local parts in the Charradissa appservice namespace.
+/// Kept here as the canonical source — matches charradissa-registration.yaml namespaces.
+/// Charradissa sets these users to PL 50 (kick power) in every room it creates or joins.
+pub const AGENT_LOCAL_PARTS: &[&str] = &[
+    "gardian", "fondament", "farga", "amassada", "cor", "caissa", "charradissa-agent",
+];
+
 pub struct AppserviceClient {
     client: Client,
     homeserver: String,
@@ -50,7 +57,17 @@ impl AppserviceClient {
 
     pub async fn create_room(&self, alias: &str, name: &str) -> Result<RoomId> {
         let url = format!("{}/_matrix/client/v3/createRoom", self.homeserver);
-        let body = serde_json::json!({ "room_alias_name": alias, "name": name });
+        // Pre-set power levels at creation: all component agents get PL 50 (kick power).
+        // The bot_user_id (sender) is already PL 100 as the room creator.
+        let agent_users: serde_json::Value = AGENT_LOCAL_PARTS.iter()
+            .map(|lp| (format!("@{}:{}", lp, self.server_name), serde_json::json!(50)))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+        let body = serde_json::json!({
+            "room_alias_name": alias,
+            "name": name,
+            "power_level_content_override": { "users": agent_users, "kick": 50 }
+        });
         let resp = self.client.post(&url)
             .header("Authorization", self.auth_header())
             .json(&body)
@@ -61,6 +78,75 @@ impl AppserviceClient {
         let room_id = json["room_id"].as_str()
             .ok_or_else(|| CharradissaError::Backend("no room_id in response".into()))?;
         Ok(RoomId::new(room_id))
+    }
+
+    /// Read the current m.room.power_levels state for a room.
+    pub async fn get_power_levels(&self, room_id: &RoomId) -> Result<serde_json::Value> {
+        let url = format!(
+            "{}/_matrix/client/v3/rooms/{}/state/m.room.power_levels",
+            self.homeserver, pct(room_id.as_str())
+        );
+        let resp = self.client.get(&url)
+            .header("Authorization", self.auth_header())
+            .send().await
+            .map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        resp.error_for_status()
+            .map_err(|e| CharradissaError::Backend(format!("get_power_levels: {}", e)))?
+            .json().await
+            .map_err(|e| CharradissaError::Backend(e.to_string()))
+    }
+
+    /// Grant kick power (PL 50) to all component agents in a room.
+    /// Reads the current power_levels state first to avoid clobbering other settings.
+    pub async fn grant_agent_kick_power(&self, room_id: &RoomId) -> Result<()> {
+        let mut pl = self.get_power_levels(room_id).await?;
+        let users = pl["users"].as_object_mut()
+            .ok_or_else(|| CharradissaError::Backend("power_levels has no users map".into()))?;
+        let mut changed = false;
+        for lp in AGENT_LOCAL_PARTS {
+            let uid = format!("@{}:{}", lp, self.server_name);
+            let current = users.get(&uid).and_then(|v| v.as_i64()).unwrap_or(0);
+            if current < 50 {
+                users.insert(uid, serde_json::json!(50));
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(());
+        }
+        let url = format!(
+            "{}/_matrix/client/v3/rooms/{}/state/m.room.power_levels",
+            self.homeserver, pct(room_id.as_str())
+        );
+        let resp = self.client.put(&url)
+            .header("Authorization", self.auth_header())
+            .json(&pl)
+            .send().await
+            .map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            return Err(CharradissaError::Backend(format!("set_power_levels failed: {}", status)));
+        }
+        Ok(())
+    }
+
+    /// Kick a user from a room.
+    pub async fn kick_user(&self, room_id: &RoomId, user_id: &UserId, reason: &str) -> Result<()> {
+        let url = format!(
+            "{}/_matrix/client/v3/rooms/{}/kick",
+            self.homeserver, pct(room_id.as_str())
+        );
+        let body = serde_json::json!({ "user_id": user_id.as_str(), "reason": reason });
+        let resp = self.client.post(&url)
+            .header("Authorization", self.auth_header())
+            .json(&body)
+            .send().await
+            .map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            return Err(CharradissaError::Backend(format!("kick failed: {}", status)));
+        }
+        Ok(())
     }
 
     pub async fn invite(&self, room_id: &RoomId, user_id: &UserId) -> Result<()> {

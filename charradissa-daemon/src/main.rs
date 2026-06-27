@@ -153,6 +153,13 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("set display name failed: {}", e);
     }
 
+    // Grant kick power (PL 50) to all component agents in every room Charradissa is
+    // currently in. This backfills existing rooms and is idempotent — rooms that
+    // already have PL ≥ 50 for agents are left untouched.
+    if let Err(e) = backend.provision_agent_kick_power().await {
+        tracing::warn!("kick power provisioning failed: {}", e);
+    }
+
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", appservice_port)).await?;
     tracing::info!("charradissa-daemon webhook listening on :{}", appservice_port);
     axum::serve(listener, app).await?;
