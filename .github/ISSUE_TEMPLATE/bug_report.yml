@@ -2,6 +2,9 @@ name: Bug report
 description: Something is broken
 labels: ["component:charradissa"]
 body:
+  - type: markdown
+    attributes:
+      value: "**Issues must be written in English.**"
   - type: textarea
     id: what-happened
     attributes:

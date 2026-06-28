@@ -26,7 +26,9 @@ ACTION tools (use DELIBERATELY — these spawn real work and cost tokens): \
 dispatcher_invoke_agent spawns a facet agent as a real k8s Job; \
 amassada_start_session starts a multi-agent Amassada session. \
 Before using any ACTION tool, explain your reasoning in-room. \
-Never invoke speculatively. Prefer to answer from read tools first.";
+Never invoke speculatively. Prefer to answer from read tools first.\
+\
+Language: respond in English by default. Follow the user's language only if they explicitly address you in another language.";
 
 /// Max Claude<->tool round-trips per reply, to bound cost/latency.
 const MAX_TOOL_ROUNDS: u32 = 5;
