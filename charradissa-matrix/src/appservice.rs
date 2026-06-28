@@ -84,6 +84,10 @@ pub async fn handle_transaction(
                 let backend = state.backend.clone();
                 tokio::spawn(async move {
                     let history = backend.room_history(&ev.room_id, Utc::now()).await.unwrap_or_default();
+                    // Typing indicators are not sent on the project-agent path. Amassada
+                    // manages its own session lifecycle and response timing; a typing
+                    // indicator fired here could linger if the session takes longer than
+                    // the Matrix timeout.
                     match call_project_agent(&project_cfg.endpoint, &project_cfg.project_id, &history, &ev).await {
                         Ok(text) if !text.trim().is_empty() => {
                             let text = strip_block_markers(&text);
@@ -113,6 +117,10 @@ pub async fn handle_transaction(
                 let backend = state.backend.clone();
                 tokio::spawn(async move {
                     let history = backend.room_history(&ev.room_id, Utc::now()).await.unwrap_or_default();
+                    // Typing indicators are not sent on the component-agent path. Component
+                    // agents run in-process via the Responder and typically reply quickly;
+                    // adding a typing indicator here would require pairing it with a clear
+                    // call, which is unnecessary overhead for synchronous in-process dispatch.
                     match component_responder.reply(&history, &ev).await {
                         Ok(text) if !text.trim().is_empty() => {
                             let text = strip_block_markers(&text);

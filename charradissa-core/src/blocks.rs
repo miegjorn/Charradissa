@@ -4,6 +4,13 @@
 /// internal session-engine convention. Content between `[MAIN]` markers is kept;
 /// everything else (sidebars, session-control blocks) is discarded.
 /// Text that contains no block markers is returned unchanged.
+///
+/// Multiple `[MAIN]` blocks within a single response are all kept and concatenated
+/// in order (not first-wins). An inline `[MAIN] text` where text follows on the
+/// same line is also supported — the trailing text is captured directly. The
+/// `[REQUEST_APPROVAL` entry in the discard list intentionally omits the closing
+/// `]` so that it matches any variant of the tag as a prefix (e.g.
+/// `[REQUEST_APPROVAL reason="..."]`).
 pub fn strip_block_markers(text: &str) -> String {
     const DISCARD: &[&str] = &[
         "[LEAVE]",

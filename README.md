@@ -306,6 +306,39 @@ autodiscover = true   # If true, projects are auto-discovered from Farga; if fal
 
 All fields have documented defaults; the only required fields are `org.name`, `org.homeserver`, and `backend.type`.
 
+### Agent routing config
+
+```toml
+# Per-room agent routing (optional).
+[agents]
+default = "http://guilhem.agents.svc.cluster.local:8080"   # fallback for unmatched rooms
+
+# Component-agent routes: room_id → agent URL. The agent at that URL receives
+# the standard { room_id, sender, content, history } body on POST /matrix/reply.
+[agents.routes]
+"!gardian-room:occitane.guilhem" = "http://gardian.agents.svc.cluster.local:8080"
+"!farga-room:occitane.guilhem"   = "http://farga.agents.svc.cluster.local:7500"
+
+# Project-backed agents: each [[agents.project]] block maps one or more rooms to
+# an Amassada endpoint. Charradissa injects project_id into the turn body.
+[[agents.project]]
+type       = "amassada_backed"
+rooms      = ["!room-projet-a:occitane.guilhem"]
+project_id = "my-project"
+endpoint   = "http://amassada.agents.svc.cluster.local:7700/sessions/{room_id}/message"
+```
+
+### Component agents (in-process responders)
+
+`[[component_agents]]` wires a room directly to an in-process `Responder` rather than an HTTP pod. Use this for lightweight agents that do not need a separate container:
+
+```toml
+[[component_agents]]
+room_id    = "!help-room:occitane.guilhem"
+model      = "claude-opus-4-5"
+system     = "You are a helpful assistant embedded in Matrix."
+```
+
 ---
 
 ## Environment Variables
@@ -321,6 +354,8 @@ All fields have documented defaults; the only required fields are `org.name`, `o
 | `JIRA_EMAIL` | — | Atlassian account email for Jira Basic auth |
 | `FARGA_URL` | `http://farga:7500` | Base URL of the Farga HTTP API for signal writes |
 | `GUILHEM_URL` | `http://guilhem.agents.svc.cluster.local:8080` | Base URL of the Guilhem pod's `/matrix/reply` endpoint |
+| `ANTHROPIC_API_KEY` | — | API key for the Anthropic Claude API; required by any agent tier that makes LLM calls directly (concierge convergence sweep, Responder-backed component agents) |
+| `AMASSADA_URL` | `http://amassada:7700` | Base URL of the Amassada service; used as the default origin for project-agent endpoints when no explicit `endpoint` is set in `[[agents.project]]` |
 | `RUST_LOG` | — | Log filter (e.g. `charradissa=debug,info`) via `tracing-subscriber` |
 
 ---
@@ -390,7 +425,34 @@ namespaces:
 > replace the file on the PVC and restart **both** Synapse and Charradissa (the
 > `as_token`/`hs_token` must stay in sync across the two).
 
-### Webhook Endpoint
+### Routing
+
+Every inbound Matrix event is dispatched through one of three paths, checked in order:
+
+1. **Project-agent path (`[[agents.project]]`)** — if the event's room ID matches an entry in `project_routes`, Charradissa POSTs to the configured Amassada endpoint:
+   ```
+   POST http://amassada:7700/sessions/{room_id}/message
+   Body: { "content": "...", "sender": "...", "room_id": "...", "project_id": "..." }
+   ```
+   The `{room_id}` placeholder in the endpoint template is substituted with the actual room ID. `project_id` is injected so Amassada can resolve the right persona via its project registry.
+
+2. **Component-agent path (`[agents.routes]`)** — if the room ID matches an entry in `agent_routes`, Charradissa POSTs to that component pod's endpoint:
+   ```
+   POST <component_url>/matrix/reply
+   Body: { "room_id": "...", "sender": "...", "content": "...", "history": [...] }
+   ```
+   Component agents run as separate pods (e.g. `@gardian`, `@farga`) and handle their own persona logic.
+
+3. **Default path → Guilhem** — all other rooms fall through to the default agent URL (`GUILHEM_URL`):
+   ```
+   POST http://guilhem.agents.svc.cluster.local:8080/matrix/reply
+   Body: { "room_id": "...", "sender": "...", "content": "...", "history": [...] }
+   ```
+   Only this path sends Matrix typing indicators (`set_typing`) to signal that Guilhem is processing the message.
+
+---
+
+## Webhook Endpoint
 
 The daemon exposes one route:
 
