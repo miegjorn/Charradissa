@@ -139,12 +139,17 @@ pub async fn handle_transaction(
                 .get(ev.room_id.as_str())
                 .cloned()
                 .unwrap_or_else(|| state.default_agent_url.clone());
-            let (agent_url, backend) = (agent_url, state.backend.clone());
+            let (agent_url, backend, self_user_id) = (agent_url, state.backend.clone(), state.self_user_id.clone());
             tokio::spawn(async move {
                 let history = backend
                     .room_history(&ev.room_id, Utc::now())
                     .await
                     .unwrap_or_default();
+
+                // Signal to the client that Guilhem is thinking. This keeps the long-poll
+                // sync connection alive so the response arrives without requiring a second
+                // message from the user (Charradissa#27).
+                let _ = backend.set_typing(&ev.room_id, &self_user_id, true, 120_000).await;
 
                 const MAX_ATTEMPTS: u32 = 3;
                 const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
@@ -161,6 +166,9 @@ pub async fn handle_transaction(
                     result = call_agent(&agent_url, &history, &ev).await;
                     attempt += 1;
                 }
+
+                // Clear typing indicator before posting the reply (or error message).
+                let _ = backend.set_typing(&ev.room_id, &self_user_id, false, 0).await;
 
                 match result {
                     Ok(text) if !text.trim().is_empty() => {
