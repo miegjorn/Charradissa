@@ -40,7 +40,7 @@ impl AppserviceClient {
     pub async fn send_message(&self, room_id: &RoomId, content: &str) -> Result<()> {
         let url = format!(
             "{}/_matrix/client/v3/rooms/{}/send/m.room.message/{}",
-            self.homeserver, room_id.as_str(), uuid::Uuid::new_v4()
+            self.homeserver, pct(room_id.as_str()), uuid::Uuid::new_v4()
         );
         let body = serde_json::json!({ "msgtype": "m.text", "body": content });
         let resp = self.client.put(&url)
@@ -254,6 +254,29 @@ impl AppserviceClient {
         if !resp.status().is_success() {
             let status = resp.status();
             return Err(CharradissaError::Backend(format!("set_display_name failed: {}", status)));
+        }
+        Ok(())
+    }
+
+    /// PUT /_matrix/client/v3/rooms/{roomId}/typing/{userId}
+    /// Best-effort — logs a warning on failure, never returns an error.
+    pub async fn set_typing(&self, room_id: &RoomId, user_id: &str, typing: bool, timeout_ms: u32) -> Result<()> {
+        let url = format!(
+            "{}/_matrix/client/v3/rooms/{}/typing/{}",
+            self.homeserver, pct(room_id.as_str()), pct(user_id)
+        );
+        let body = if typing {
+            serde_json::json!({ "typing": true, "timeout": timeout_ms })
+        } else {
+            serde_json::json!({ "typing": false })
+        };
+        let resp = self.client.put(&url)
+            .header("Authorization", self.auth_header())
+            .json(&body)
+            .send().await
+            .map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        if !resp.status().is_success() {
+            tracing::warn!("set_typing failed for {} in {}: {}", user_id, room_id.as_str(), resp.status());
         }
         Ok(())
     }

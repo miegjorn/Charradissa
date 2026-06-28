@@ -101,6 +101,10 @@ impl ChatBackend for MatrixBackend {
     async fn joined_rooms(&self) -> Result<Vec<RoomId>> {
         self.client.joined_rooms().await
     }
+
+    async fn set_typing(&self, room: &RoomId, user_id: &str, typing: bool, timeout_ms: u32) -> Result<()> {
+        self.client.set_typing(room, user_id, typing, timeout_ms).await
+    }
 }
 
 /// Number of recent messages fed to guilhem as conversational context each turn.

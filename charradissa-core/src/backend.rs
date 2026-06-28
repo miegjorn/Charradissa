@@ -19,4 +19,11 @@ pub trait ChatBackend: Send + Sync {
     async fn delete_room(&self, room: &RoomId) -> Result<()>;
     async fn join_room(&self, room: &RoomId) -> Result<()> { Ok(()) }
     async fn joined_rooms(&self) -> Result<Vec<RoomId>> { Ok(vec![]) }
+    /// Send a typing indicator for the bot user in `room`.
+    /// `typing: true` = start indicator (auto-clears after `timeout_ms`).
+    /// `typing: false` = clear immediately. Non-fatal — impls must not propagate errors.
+    async fn set_typing(&self, room: &RoomId, user_id: &str, typing: bool, timeout_ms: u32) -> Result<()> {
+        let _ = (room, user_id, typing, timeout_ms);
+        Ok(())
+    }
 }
