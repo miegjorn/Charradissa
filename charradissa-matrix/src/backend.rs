@@ -244,6 +244,150 @@ pub fn parse_messages_chunk(body: &serde_json::Value, room: &RoomId) -> Vec<Chat
 mod tests {
     use super::*;
 
+    /// Build a MatrixBackend pointed at the given homeserver URL (for test use).
+    fn backend_for_test(homeserver: &str) -> MatrixBackend {
+        MatrixBackend::new(
+            homeserver.to_string(),
+            "test-token".to_string(),
+            "@charradissa:occitane.guilhem".to_string(),
+            "occitane.guilhem".to_string(),
+        )
+    }
+
+    fn test_params(mock_uri: &str) -> RoomProvisioningParams {
+        RoomProvisioningParams {
+            farga_url: mock_uri.to_string(),
+            fondament_url: mock_uri.to_string(),
+            anthropic_api_key: "test-key".to_string(),
+            dispatcher_url: "http://dispatcher:9090/mcp".to_string(),
+            amassada_url: "http://amassada:7700".to_string(),
+        }
+    }
+
+    /// Happy path: Farga returns ["amassada"], Fondament returns a non-empty prompt,
+    /// Matrix join returns 404 (room not found), then createRoom returns a room_id.
+    /// Expected: one entry in the returned map.
+    #[tokio::test]
+    async fn provision_project_rooms_happy_path() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::{method, path};
+
+        let mock = MockServer::start().await;
+
+        // Farga: component list for "test-project" → ["amassada"]
+        Mock::given(method("GET"))
+            .and(path("/context/components/test-project"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!(["amassada"]))
+            )
+            .mount(&mock)
+            .await;
+
+        // Fondament: resolve fondament/amassada-agent → non-empty system prompt
+        Mock::given(method("GET"))
+            .and(path("/resolve/fondament/amassada-agent"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("You are an Amassada session orchestrator.")
+            )
+            .mount(&mock)
+            .await;
+
+        // Matrix join for project room → 404 (triggers create_room)
+        Mock::given(method("POST"))
+            .and(path("/_matrix/client/v3/join/%23test-project%3Aoccitane.guilhem"))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_json(serde_json::json!({"errcode": "M_NOT_FOUND"}))
+            )
+            .mount(&mock)
+            .await;
+
+        // Matrix join for component room → 404 (triggers create_room)
+        Mock::given(method("POST"))
+            .and(path("/_matrix/client/v3/join/%23amassada%3Aoccitane.guilhem"))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_json(serde_json::json!({"errcode": "M_NOT_FOUND"}))
+            )
+            .mount(&mock)
+            .await;
+
+        // Matrix createRoom → used for both project and component rooms
+        Mock::given(method("POST"))
+            .and(path("/_matrix/client/v3/createRoom"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"room_id": "!amassada:occitane.guilhem"}))
+            )
+            .mount(&mock)
+            .await;
+
+        let backend = backend_for_test(&mock.uri());
+        let params = test_params(&mock.uri());
+
+        let result = backend.provision_project_rooms("test-project", &params).await;
+        assert!(result.is_ok(), "provision_project_rooms should succeed: {:?}", result.err());
+        let map = result.unwrap();
+        assert_eq!(map.len(), 1, "expected exactly one component room in the map");
+    }
+
+    /// Empty-prompt skip: Farga returns ["amassada"], Fondament returns 404.
+    /// Expected: zero entries in the map (component room creation is skipped).
+    #[tokio::test]
+    async fn provision_project_rooms_skips_empty_prompt() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::{method, path};
+
+        let mock = MockServer::start().await;
+
+        // Farga: component list for "test-project" → ["amassada"]
+        Mock::given(method("GET"))
+            .and(path("/context/components/test-project"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!(["amassada"]))
+            )
+            .mount(&mock)
+            .await;
+
+        // Fondament: 404 → empty system_prompt → component is skipped
+        Mock::given(method("GET"))
+            .and(path("/resolve/fondament/amassada-agent"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+
+        // Matrix join for project room → 404 → create_room
+        Mock::given(method("POST"))
+            .and(path("/_matrix/client/v3/join/%23test-project%3Aoccitane.guilhem"))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_json(serde_json::json!({"errcode": "M_NOT_FOUND"}))
+            )
+            .mount(&mock)
+            .await;
+
+        // Matrix createRoom → for the project room only (component is skipped before create)
+        Mock::given(method("POST"))
+            .and(path("/_matrix/client/v3/createRoom"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"room_id": "!test-project:occitane.guilhem"}))
+            )
+            .mount(&mock)
+            .await;
+
+        let backend = backend_for_test(&mock.uri());
+        let params = test_params(&mock.uri());
+
+        let result = backend.provision_project_rooms("test-project", &params).await;
+        assert!(result.is_ok(), "provision_project_rooms should succeed: {:?}", result.err());
+        let map = result.unwrap();
+        assert_eq!(map.len(), 0, "component room should be skipped when Fondament returns empty prompt");
+    }
+
     #[test]
     fn room_provisioning_params_holds_all_fields() {
         let p = RoomProvisioningParams {
