@@ -290,17 +290,26 @@ async fn call_project_agent(
             .collect(),
     };
 
-    reqwest::Client::new()
-        .post(&url)
-        .timeout(std::time::Duration::from_secs(300))
-        .json(&req)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .json::<Resp>()
-        .await
-        .map_err(|e| e.to_string())
-        .map(|r| r.text)
+    // Retry on connection errors (pod restart, rolling-deploy gap).
+    // Backoff: 1s → 2s → 4s before giving up and surfacing the "unreachable" message.
+    let client = reqwest::Client::new();
+    let mut last_err = String::new();
+    for attempt in 0u32..3 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(1u64 << (attempt - 1))).await;
+        }
+        match client.post(&url).timeout(std::time::Duration::from_secs(300)).json(&req).send().await {
+            Ok(resp) => {
+                return resp.json::<Resp>().await.map_err(|e| e.to_string()).map(|r| r.text);
+            }
+            Err(e) if e.is_connect() || e.is_request() => {
+                tracing::warn!("project agent connection error (attempt {}/3): {}", attempt + 1, e);
+                last_err = e.to_string();
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Err(last_err)
 }
 
 #[cfg(test)]
