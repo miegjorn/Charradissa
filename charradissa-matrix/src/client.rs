@@ -212,6 +212,10 @@ impl AppserviceClient {
         &self.bot_user_id
     }
 
+    pub fn server_name(&self) -> &str {
+        &self.server_name
+    }
+
     pub async fn joined_rooms(&self) -> Result<Vec<RoomId>> {
         let url = format!("{}/_matrix/client/v3/joined_rooms", self.homeserver);
         let resp = self.client.get(&url).header("Authorization", self.auth_header())

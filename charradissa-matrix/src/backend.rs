@@ -1,11 +1,21 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 use std::sync::Arc;
 use charradissa_core::backend::ChatBackend;
 use charradissa_core::error::Result;
+use charradissa_core::responder::Responder;
 use charradissa_core::types::*;
 use crate::client::AppserviceClient;
 use serde_json;
+
+pub struct RoomProvisioningParams {
+    pub farga_url: String,
+    pub fondament_url: String,
+    pub anthropic_api_key: String,
+    pub dispatcher_url: String,
+    pub amassada_url: String,
+}
 
 pub struct MatrixBackend {
     client: Arc<AppserviceClient>,
@@ -38,6 +48,101 @@ impl MatrixBackend {
             }
         }
         Ok(())
+    }
+
+    /// Discover project components from Farga, resolve system prompts from Fondament,
+    /// create-or-join aliased rooms, and return a room_id → Responder map.
+    pub async fn provision_project_rooms(
+        &self,
+        project: &str,
+        params: &RoomProvisioningParams,
+    ) -> Result<HashMap<RoomId, Arc<Responder>>> {
+        let http = reqwest::Client::new();
+
+        // 1. Fetch component list from Farga.
+        let components_url = format!("{}/context/components/{}", params.farga_url, project);
+        let components: Vec<String> = http.get(&components_url)
+            .send().await
+            .map_err(|e| charradissa_core::error::CharradissaError::Backend(
+                format!("Farga component list failed: {}", e)
+            ))?
+            .json().await
+            .map_err(|e| charradissa_core::error::CharradissaError::Backend(
+                format!("Farga component list parse failed: {}", e)
+            ))?;
+
+        if components.is_empty() {
+            tracing::warn!("no components found for project '{}' in Farga", project);
+            return Ok(HashMap::new());
+        }
+
+        // 2. Create-or-join project room (no Responder — Guilhem HTTP handles it).
+        if let Err(e) = self.client.create_or_join_aliased_room(project, &format!("{} project", project)).await {
+            tracing::warn!("project room provisioning failed for '{}': {}", project, e);
+        } else {
+            tracing::info!("project room #{}:… ready", project);
+        }
+
+        // 3. For each component: resolve system prompt + create-or-join component room.
+        let mut map = HashMap::new();
+        let server_name = self.client.server_name().to_string();
+
+        for component in &components {
+            // Fetch system prompt from Fondament (best-effort).
+            let fondament_id = format!("fondament/{}-agent", component);
+            let resolve_url = format!("{}/resolve/{}", params.fondament_url, fondament_id);
+            let system_prompt = match http.get(&resolve_url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    resp.text().await.unwrap_or_default()
+                }
+                Ok(resp) => {
+                    tracing::warn!("Fondament resolve {} returned {}", fondament_id, resp.status());
+                    String::new()
+                }
+                Err(e) => {
+                    tracing::warn!("Fondament resolve {} failed: {}", fondament_id, e);
+                    String::new()
+                }
+            };
+
+            // Create-or-join component room.
+            match self.client.create_or_join_aliased_room(component, &format!("{} agent", component)).await {
+                Ok(room_id) => {
+                    tracing::info!("component room #{}: {} ready", component, room_id.as_str());
+                    let responder = Arc::new(Responder::with_config(
+                        params.anthropic_api_key.clone(),
+                        "claude-sonnet-4-6".into(),
+                        server_name.clone(),
+                        params.farga_url.clone(),
+                        params.dispatcher_url.clone(),
+                        params.amassada_url.clone(),
+                        system_prompt,
+                        false,
+                    ));
+                    map.insert(room_id, responder);
+                }
+                Err(e) => {
+                    tracing::warn!("component room provisioning failed for '{}': {}", component, e);
+                }
+            }
+        }
+
+        // 4. Write observability signal to Farga (best-effort, ignore errors).
+        let room_names: Vec<&str> = map.keys().map(|r| r.as_str()).collect();
+        let signal_url = format!("{}/signals", params.farga_url);
+        let _ = http.post(&signal_url)
+            .json(&serde_json::json!({
+                "project": project,
+                "source": "charradissa-provisioning",
+                "signals": [{
+                    "project": project,
+                    "source": "charradissa-provisioning",
+                    "content": format!("provisioned {} component rooms: {}", room_names.len(), room_names.join(", "))
+                }]
+            }))
+            .send().await;
+
+        Ok(map)
     }
 }
 
@@ -129,6 +234,20 @@ pub fn parse_messages_chunk(body: &serde_json::Value, room: &RoomId) -> Vec<Chat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn room_provisioning_params_holds_all_fields() {
+        let p = RoomProvisioningParams {
+            farga_url: "http://farga:7500".into(),
+            fondament_url: "http://fondament:7800".into(),
+            anthropic_api_key: "key".into(),
+            dispatcher_url: "http://dispatcher:9090/mcp".into(),
+            amassada_url: "http://amassada:7700".into(),
+        };
+        assert_eq!(p.farga_url, "http://farga:7500");
+        assert_eq!(p.fondament_url, "http://fondament:7800");
+    }
+
     #[test]
     fn parses_messages_response_oldest_first() {
         let body = serde_json::json!({"chunk":[
