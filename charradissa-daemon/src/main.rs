@@ -10,7 +10,7 @@ use charradissa_core::farcaster::MilestoneEvent;
 use charradissa_core::farcaster::FarcasterAgent;
 use charradissa_core::farcaster::ClaudeFarcasterAnalyzer;
 use charradissa_core::farga::HttpFargaWriter;
-use charradissa_matrix::backend::MatrixBackend;
+use charradissa_matrix::backend::{MatrixBackend, RoomProvisioningParams};
 use charradissa_matrix::appservice::AppserviceState;
 use charradissa_core::responder::Responder;
 use axum::{routing::put, Router};
@@ -118,25 +118,75 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|| std::env::var("GUILHEM_URL").ok())
         .unwrap_or_else(|| "http://guilhem.agents.svc.cluster.local:8080".into());
 
-    // Build component agent responders from config (room_id → Responder).
+    // Startup: ensure the appservice is registered with Synapse, set display name,
+    // and grant kick power before provisioning rooms.
+    if let Err(e) = backend.ensure_registered().await {
+        tracing::warn!("self-registration failed: {}", e);
+    }
+    if let Err(e) = backend.set_self_display_name("Guilhem").await {
+        tracing::warn!("set display name failed: {}", e);
+    }
+    // Grant kick power (PL 50) to all component agents in every room Charradissa is
+    // currently in. This backfills existing rooms and is idempotent — rooms that
+    // already have PL ≥ 50 for agents are left untouched.
+    if let Err(e) = backend.provision_agent_kick_power().await {
+        tracing::warn!("kick power provisioning failed: {}", e);
+    }
+
+    let fondament_url = config.provisioning.fondament_url.clone()
+        .or_else(|| std::env::var("FONDAMENT_URL").ok())
+        .unwrap_or_else(|| "http://fondament:7800".into());
+
+    let provisioning_params = RoomProvisioningParams {
+        farga_url: farga_base_url.clone(),
+        fondament_url,
+        anthropic_api_key: anthropic_api_key.clone(),
+        dispatcher_url: std::env::var("DISPATCHER_URL")
+            .unwrap_or_else(|_| "http://dispatcher.agents.svc.cluster.local:9090/mcp".into()),
+        amassada_url: std::env::var("AMASSADA_URL")
+            .unwrap_or_else(|_| "http://amassada:7700".into()),
+    };
+
+    // Dynamic provisioning: query Farga for each project's components, resolve system
+    // prompts via Fondament, and create/join the corresponding Matrix rooms.
     let mut component_agents = HashMap::new();
-    for ca in &config.component_agents {
-        if ca.room_id.is_empty() {
-            tracing::warn!("component agent '{}' has no room_id configured, skipping", ca.name);
-            continue;
+    for project in &config.provisioning.projects {
+        match backend.provision_project_rooms(project, &provisioning_params).await {
+            Ok(rooms) => {
+                tracing::info!("provisioned {} rooms for project '{}'", rooms.len(), project);
+                for (room_id, responder) in rooms {
+                    component_agents.insert(room_id.as_str().to_string(), responder);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("provisioning failed for project '{}': {}", project, e);
+            }
         }
-        let responder = Arc::new(Responder::with_config(
-            anthropic_api_key.clone(),
-            "claude-sonnet-4-6".into(),
-            server_name.clone(),
-            farga_base_url.clone(),
-            std::env::var("DISPATCHER_URL").unwrap_or_else(|_| "http://dispatcher.agents.svc.cluster.local:9090/mcp".into()),
-            std::env::var("AMASSADA_URL").unwrap_or_else(|_| "http://amassada:7700".into()),
-            ca.system_prompt.clone(),
-            false, // component agents do not get org-level tools
-        ));
-        tracing::info!("registered component agent '{}' for room {}", ca.name, ca.room_id);
-        component_agents.insert(ca.room_id.clone(), responder);
+    }
+
+    // Fallback: if provisioning yielded nothing (Farga/Fondament unavailable at startup),
+    // fall back to static [component_agents] config entries.
+    if component_agents.is_empty() {
+        for ca in &config.component_agents {
+            if ca.room_id.is_empty() {
+                tracing::warn!("component agent '{}' has no room_id configured, skipping", ca.name);
+                continue;
+            }
+            let responder = Arc::new(Responder::with_config(
+                anthropic_api_key.clone(),
+                "claude-sonnet-4-6".into(),
+                server_name.clone(),
+                farga_base_url.clone(),
+                std::env::var("DISPATCHER_URL")
+                    .unwrap_or_else(|_| "http://dispatcher.agents.svc.cluster.local:9090/mcp".into()),
+                std::env::var("AMASSADA_URL")
+                    .unwrap_or_else(|_| "http://amassada:7700".into()),
+                ca.system_prompt.clone(),
+                false, // component agents do not get org-level tools
+            ));
+            tracing::info!("registered component agent '{}' for room {} (config fallback)", ca.name, ca.room_id);
+            component_agents.insert(ca.room_id.clone(), responder);
+        }
     }
 
     // Build project_routes: expand each ProjectAgentConfig's room list into
@@ -165,20 +215,6 @@ async fn main() -> anyhow::Result<()> {
             put(charradissa_matrix::appservice::handle_transaction))
         .with_state(appservice_state)
         .merge(queue_api::router(queue_state));
-
-    if let Err(e) = backend.ensure_registered().await {
-        tracing::warn!("self-registration failed: {}", e);
-    }
-    if let Err(e) = backend.set_self_display_name("Guilhem").await {
-        tracing::warn!("set display name failed: {}", e);
-    }
-
-    // Grant kick power (PL 50) to all component agents in every room Charradissa is
-    // currently in. This backfills existing rooms and is idempotent — rooms that
-    // already have PL ≥ 50 for agents are left untouched.
-    if let Err(e) = backend.provision_agent_kick_power().await {
-        tracing::warn!("kick power provisioning failed: {}", e);
-    }
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", appservice_port)).await?;
     tracing::info!("charradissa-daemon webhook listening on :{}", appservice_port);
