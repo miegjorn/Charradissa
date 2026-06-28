@@ -90,7 +90,12 @@ fn default_true() -> bool { true }
 ///
 /// [agents.routes]
 /// "!abc123:occitane.guilhem" = "http://amassada-agent.agents.svc.cluster.local:8080"
-/// "!def456:occitane.guilhem" = "http://farga-agent.agents.svc.cluster.local:8080"
+///
+/// [[agents.project]]
+/// type = "amassada_backed"
+/// rooms = ["!proj-room:occitane.guilhem"]
+/// project_id = "my-project"
+/// endpoint = "http://amassada:7700/sessions/{room_id}/message"
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct AgentsConfig {
@@ -99,6 +104,28 @@ pub struct AgentsConfig {
     /// room_id → agent URL overrides.
     #[serde(default)]
     pub routes: HashMap<String, String>,
+    /// Project agent configurations — each entry covers one or more Matrix rooms
+    /// backed by a specific Amassada project persona.
+    #[serde(default)]
+    pub project: Vec<ProjectAgentConfig>,
+}
+
+/// Configuration for an Amassada-backed project agent.
+///
+/// Each entry maps a set of Matrix rooms to an Amassada endpoint and a project id.
+/// Charradissa resolves the project from this table and injects `project_id` into
+/// the turn body it sends to Amassada so that Amassada can select the right persona.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProjectAgentConfig {
+    /// Must be `"amassada_backed"`.
+    #[serde(rename = "type")]
+    pub agent_type: String,
+    /// Matrix room IDs served by this project agent.
+    pub rooms: Vec<String>,
+    /// The project identifier transmitted to Amassada in every turn.
+    pub project_id: String,
+    /// Amassada endpoint template.  `{room_id}` is substituted at call time.
+    pub endpoint: String,
 }
 
 impl Config {

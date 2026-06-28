@@ -139,6 +139,16 @@ async fn main() -> anyhow::Result<()> {
         component_agents.insert(ca.room_id.clone(), responder);
     }
 
+    // Build project_routes: expand each ProjectAgentConfig's room list into
+    // a flat room_id → config map (cloning the config per room so the lookup
+    // is O(1) and doesn't require an extra indirection at dispatch time).
+    let mut project_routes = HashMap::new();
+    for proj in &config.agents.project {
+        for room in &proj.rooms {
+            project_routes.insert(room.clone(), proj.clone());
+        }
+    }
+
     let appservice_state = AppserviceState {
         hs_token,
         default_agent_url,
@@ -146,6 +156,7 @@ async fn main() -> anyhow::Result<()> {
         backend: Arc::clone(&backend) as Arc<dyn charradissa_core::backend::ChatBackend>,
         self_user_id: bot_user_id.clone(),
         component_agents,
+        project_routes,
     };
 
     let app = Router::new()

@@ -510,7 +510,7 @@ async fn spin_up_governance_session(
     };
 
     let transport = std::sync::Arc::new(CharradissaTransport::new(room.clone(), backend));
-    let engine = SessionEngine::new(canvas, goal, transport);
+    let mut engine = SessionEngine::new(canvas, goal, transport);
     tracing::info!("governance session starting in {} for node {}", room, node_id);
     match engine.run().await {
         Ok(output) => tracing::info!(
