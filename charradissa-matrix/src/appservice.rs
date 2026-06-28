@@ -1,5 +1,6 @@
 use axum::{extract::{Path, Query, State}, http::{HeaderMap, StatusCode}, Json};
 use charradissa_core::backend::ChatBackend;
+use charradissa_core::blocks::strip_block_markers;
 use charradissa_core::config::ProjectAgentConfig;
 use charradissa_core::responder::{should_respond, Responder};
 use charradissa_core::types::{ChatEvent, ChatEventKind, RoomId, UserId};
@@ -85,6 +86,7 @@ pub async fn handle_transaction(
                     let history = backend.room_history(&ev.room_id, Utc::now()).await.unwrap_or_default();
                     match call_project_agent(&project_cfg.endpoint, &project_cfg.project_id, &history, &ev).await {
                         Ok(text) if !text.trim().is_empty() => {
+                            let text = strip_block_markers(&text);
                             if let Err(e) = backend.send_message(&ev.room_id, &text).await {
                                 tracing::error!("project agent send failed: {}", e);
                             }
@@ -113,6 +115,7 @@ pub async fn handle_transaction(
                     let history = backend.room_history(&ev.room_id, Utc::now()).await.unwrap_or_default();
                     match component_responder.reply(&history, &ev).await {
                         Ok(text) if !text.trim().is_empty() => {
+                            let text = strip_block_markers(&text);
                             if let Err(e) = backend.send_message(&ev.room_id, &text).await {
                                 tracing::error!("component agent send failed: {}", e);
                             }
@@ -172,6 +175,7 @@ pub async fn handle_transaction(
 
                 match result {
                     Ok(text) if !text.trim().is_empty() => {
+                        let text = strip_block_markers(&text);
                         if let Err(e) = backend.send_message(&ev.room_id, &text).await {
                             tracing::error!("agent send failed: {}", e);
                         }

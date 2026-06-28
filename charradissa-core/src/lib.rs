@@ -1,3 +1,4 @@
+pub mod blocks;
 pub mod config;
 pub mod registration;
 pub mod error;
