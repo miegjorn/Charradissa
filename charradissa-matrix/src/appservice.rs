@@ -89,9 +89,14 @@ pub async fn handle_transaction(
                     // indicator fired here could linger if the session takes longer than
                     // the Matrix timeout.
                     match call_project_agent(&project_cfg.endpoint, &project_cfg.project_id, &history, &ev).await {
-                        Ok(text) if !text.trim().is_empty() => {
-                            let text = strip_block_markers(&text);
-                            if let Err(e) = backend.send_message(&ev.room_id, &text).await {
+                        Ok(raw) if !raw.trim().is_empty() => {
+                            // Strip must happen before the empty check — a response that is
+                            // entirely block-protocol markers (e.g. [CONSULT]…[LEAVE] with no
+                            // [MAIN]) strips to empty and should not be forwarded to the room.
+                            let text = strip_block_markers(&raw);
+                            if text.trim().is_empty() {
+                                tracing::warn!("project agent reply stripped to empty (no [MAIN] block in response)");
+                            } else if let Err(e) = backend.send_message(&ev.room_id, &text).await {
                                 tracing::error!("project agent send failed: {}", e);
                             }
                         }
