@@ -75,6 +75,7 @@ impl Transport for CharradissaTransport {
             thinking_budget: None,
             api_key: None,
             shared_context: None,
+            mcp_scopes: vec![],
         }).await.map_err(|e| AmassadaError::Transport(e.to_string()))?;
 
         Ok(ConsultResponse {
