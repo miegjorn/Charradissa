@@ -118,19 +118,12 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|| std::env::var("GUILHEM_URL").ok())
         .unwrap_or_else(|| "http://guilhem.agents.svc.cluster.local:8080".into());
 
-    // Startup: ensure the appservice is registered with Synapse, set display name,
-    // and grant kick power before provisioning rooms.
+    // Startup: ensure the appservice is registered with Synapse and set display name.
     if let Err(e) = backend.ensure_registered().await {
         tracing::warn!("self-registration failed: {}", e);
     }
     if let Err(e) = backend.set_self_display_name("Guilhem").await {
         tracing::warn!("set display name failed: {}", e);
-    }
-    // Grant kick power (PL 50) to all component agents in every room Charradissa is
-    // currently in. This backfills existing rooms and is idempotent — rooms that
-    // already have PL ≥ 50 for agents are left untouched.
-    if let Err(e) = backend.provision_agent_kick_power().await {
-        tracing::warn!("kick power provisioning failed: {}", e);
     }
 
     let fondament_url = config.provisioning.fondament_url.clone()
@@ -197,6 +190,13 @@ async fn main() -> anyhow::Result<()> {
         for room in &proj.rooms {
             project_routes.insert(room.clone(), proj.clone());
         }
+    }
+
+    // Grant kick power (PL 50) to all component agents in every room Charradissa is now
+    // in. Running after provisioning ensures newly-created rooms receive the grant in
+    // this startup cycle. Idempotent — rooms already at PL ≥ 50 are left untouched.
+    if let Err(e) = backend.provision_agent_kick_power().await {
+        tracing::warn!("kick power provisioning failed: {}", e);
     }
 
     let appservice_state = AppserviceState {
