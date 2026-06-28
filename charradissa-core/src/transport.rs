@@ -74,6 +74,7 @@ impl Transport for CharradissaTransport {
             max_tokens: 1024,
             thinking_budget: None,
             api_key: None,
+            shared_context: None,
         }).await.map_err(|e| AmassadaError::Transport(e.to_string()))?;
 
         Ok(ConsultResponse {

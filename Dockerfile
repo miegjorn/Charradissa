@@ -1,8 +1,11 @@
 FROM rust:1.90-slim AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
-# charradissa-core has a path dependency on amassada-core (../../Amassada). Provide the
-# Amassada repo as a named build context so the relative path resolves to /Amassada:
-#   docker build --build-context amassada=../Amassada -t ... .
+# charradissa-core → amassada-core → fondament-core (transitive path deps).
+# Provide both upstream repos as named build contexts so the relative paths resolve:
+#   /Fondament → fondament-core (amassada-core's dep: ../../../Fondament/fondament-core)
+#   /Amassada  → amassada-core  (charradissa-core's dep: ../../Amassada/crates/amassada-core)
+WORKDIR /Fondament
+COPY --from=fondament . .
 WORKDIR /Amassada
 COPY --from=amassada . .
 WORKDIR /app

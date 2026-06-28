@@ -20,3 +20,17 @@ project_key = "PROJ"
 
 [projects]
 autodiscover = true
+
+# Per-room agent routing (optional).
+# Org rooms (e.g. Guilhem) use the default GUILHEM_URL; no config needed.
+[agents]
+default = "http://guilhem.agents.svc.cluster.local:8080"
+
+# Project-backed agents: each [[agents.project]] entry maps one or more Matrix
+# rooms to an Amassada endpoint. Charradissa injects project_id into the turn
+# body so Amassada can resolve the right persona from its project registry.
+[[agents.project]]
+type = "amassada_backed"
+rooms = ["!room-projet-a:occitane.guilhem"]
+project_id = "my-project"
+endpoint = "http://amassada.agents.svc.cluster.local:7700/sessions/{room_id}/message"

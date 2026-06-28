@@ -1,5 +1,6 @@
 use axum::{extract::{Path, Query, State}, http::{HeaderMap, StatusCode}, Json};
 use charradissa_core::backend::ChatBackend;
+use charradissa_core::config::ProjectAgentConfig;
 use charradissa_core::responder::{should_respond, Responder};
 use charradissa_core::types::{ChatEvent, ChatEventKind, RoomId, UserId};
 use chrono::Utc;
@@ -20,6 +21,9 @@ pub struct AppserviceState {
     /// these rooms, the corresponding Responder handles it inline (in-process)
     /// rather than going through the agent_routes/default_agent_url HTTP path.
     pub component_agents: HashMap<String, Arc<Responder>>,
+    /// Project agent configs keyed by Matrix room ID. Messages in these rooms are
+    /// forwarded to Amassada with `project_id` injected into the turn body.
+    pub project_routes: HashMap<String, ProjectAgentConfig>,
 }
 
 pub fn token_ok(provided: Option<&str>, expected: &str) -> bool {
@@ -72,6 +76,34 @@ pub async fn handle_transaction(
 
         if let Some(ev) = parse_matrix_event(&raw) {
             if !should_respond(&ev, &state.self_user_id) {
+                continue;
+            }
+
+            if let Some(project_cfg) = state.project_routes.get(ev.room_id.as_str()).cloned() {
+                let backend = state.backend.clone();
+                tokio::spawn(async move {
+                    let history = backend.room_history(&ev.room_id, Utc::now()).await.unwrap_or_default();
+                    match call_project_agent(&project_cfg.endpoint, &project_cfg.project_id, &history, &ev).await {
+                        Ok(text) if !text.trim().is_empty() => {
+                            if let Err(e) = backend.send_message(&ev.room_id, &text).await {
+                                tracing::error!("project agent send failed: {}", e);
+                            }
+                        }
+                        Ok(_) => tracing::warn!("project agent produced an empty reply"),
+                        Err(e) => {
+                            tracing::error!("project agent reply failed: {}", e);
+                            if let Err(send_err) = backend
+                                .send_message(
+                                    &ev.room_id,
+                                    "\u{26A0} This project agent is unreachable — please try again in a moment.",
+                                )
+                                .await
+                            {
+                                tracing::error!("fallback message send failed: {}", send_err);
+                            }
+                        }
+                    }
+                });
                 continue;
             }
 
@@ -197,6 +229,60 @@ async fn call_agent(agent_url: &str, history: &[ChatEvent], ev: &ChatEvent) -> R
         .map(|r| r.text)
 }
 
+/// POST a turn to an Amassada project endpoint.
+///
+/// The endpoint template has `{room_id}` substituted with the actual room ID.
+/// The body carries `project_id` so Amassada can resolve the right persona via
+/// its project registry (A-1).  The response format is `{ "text": "..." }`.
+async fn call_project_agent(
+    endpoint_template: &str,
+    project_id: &str,
+    history: &[ChatEvent],
+    ev: &ChatEvent,
+) -> Result<String, String> {
+    #[derive(serde::Serialize)]
+    struct HistoryEntry<'a> {
+        sender: &'a str,
+        content: &'a str,
+    }
+    #[derive(serde::Serialize)]
+    struct Req<'a> {
+        room_id: &'a str,
+        sender: &'a str,
+        content: &'a str,
+        project_id: &'a str,
+        history: Vec<HistoryEntry<'a>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        text: String,
+    }
+
+    let url = endpoint_template.replace("{room_id}", ev.room_id.as_str());
+    let req = Req {
+        room_id: ev.room_id.as_str(),
+        sender: ev.sender.as_str(),
+        content: &ev.content,
+        project_id,
+        history: history
+            .iter()
+            .map(|e| HistoryEntry { sender: e.sender.as_str(), content: &e.content })
+            .collect(),
+    };
+
+    reqwest::Client::new()
+        .post(&url)
+        .timeout(std::time::Duration::from_secs(300))
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .json::<Resp>()
+        .await
+        .map_err(|e| e.to_string())
+        .map(|r| r.text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +307,91 @@ mod tests {
         map.insert(room_id.to_string(), r.clone());
         assert!(map.contains_key(room_id));
         assert!(!map.contains_key("!other:occitane.guilhem"));
+    }
+
+    // ── project routing ───────────────────────────────────────────────────────
+
+    use charradissa_core::config::ProjectAgentConfig;
+
+    fn make_project_cfg(project_id: &str, rooms: &[&str], endpoint: &str) -> HashMap<String, ProjectAgentConfig> {
+        let cfg = ProjectAgentConfig {
+            agent_type: "amassada_backed".into(),
+            rooms: rooms.iter().map(|r| r.to_string()).collect(),
+            project_id: project_id.into(),
+            endpoint: endpoint.into(),
+        };
+        rooms.iter().map(|r| (r.to_string(), cfg.clone())).collect()
+    }
+
+    #[test]
+    fn project_routes_map_room_to_project_config() {
+        let routes = make_project_cfg(
+            "alpha",
+            &["!proj-a:occitane.guilhem", "!proj-b:occitane.guilhem"],
+            "http://amassada:7700/sessions/{room_id}/message",
+        );
+        let cfg_a = routes.get("!proj-a:occitane.guilhem").unwrap();
+        assert_eq!(cfg_a.project_id, "alpha");
+        let cfg_b = routes.get("!proj-b:occitane.guilhem").unwrap();
+        assert_eq!(cfg_b.project_id, "alpha");
+        // unregistered room → not in map
+        assert!(routes.get("!org-general:occitane.guilhem").is_none());
+    }
+
+    #[test]
+    fn endpoint_room_id_substitution() {
+        let template = "http://amassada:7700/sessions/{room_id}/message";
+        let room_id = "!proj-a:occitane.guilhem";
+        let url = template.replace("{room_id}", room_id);
+        assert_eq!(url, "http://amassada:7700/sessions/!proj-a:occitane.guilhem/message");
+        assert!(!url.contains("{room_id}"), "substitution must replace the placeholder");
+    }
+
+    #[tokio::test]
+    async fn call_project_agent_sends_project_id_in_body() {
+        use axum::{extract::State, Json, Router, routing::post};
+        use charradissa_core::types::{ChatEventKind, RoomId, UserId};
+        use chrono::Utc;
+        use std::sync::{Arc, Mutex};
+
+        type Captured = Arc<Mutex<Option<serde_json::Value>>>;
+        let captured: Captured = Arc::new(Mutex::new(None));
+        let captured_clone = captured.clone();
+
+        let app = Router::new()
+            .route(
+                "/sessions/:room_id/message",
+                post(|State(cap): State<Captured>, Json(body): Json<serde_json::Value>| async move {
+                    *cap.lock().unwrap() = Some(body);
+                    Json(serde_json::json!({"text": "pong"}))
+                }),
+            )
+            .with_state(captured_clone);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let ev = ChatEvent {
+            event_id: "$e1".into(),
+            room_id: RoomId::new("!proj-a:occitane.guilhem"),
+            sender: UserId::new("@user:server"),
+            content: "hello project".into(),
+            timestamp: Utc::now(),
+            kind: ChatEventKind::Message,
+        };
+
+        let endpoint = format!("http://{}/sessions/{{room_id}}/message", addr);
+        let result = call_project_agent(&endpoint, "alpha", &[], &ev).await;
+        assert_eq!(result.as_deref().ok(), Some("pong"), "expected pong from mock server");
+
+        let json = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(json["project_id"].as_str(), Some("alpha"),
+            "project_id must be present in the turn body");
+        assert_eq!(json["room_id"].as_str(), Some("!proj-a:occitane.guilhem"),
+            "room_id must be present in the turn body");
+        assert_eq!(json["content"].as_str(), Some("hello project"),
+            "content must be present in the turn body");
     }
 }
 

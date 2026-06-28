@@ -18,12 +18,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Charradissa's Dockerfile has a path dep on Amassada (amassada-core).
-      # Check it out as a named build context so the relative path resolves.
+      # Charradissa → amassada-core → fondament-core (transitive path deps).
+      # Check out both upstream repos as named build contexts.
       - uses: actions/checkout@v4
         with:
           repository: miegjorn/Amassada
           path: amassada-src
+          token: ${{ secrets.MIEGJORN_CI_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          repository: miegjorn/Fondament
+          path: fondament-src
           token: ${{ secrets.MIEGJORN_CI_TOKEN }}
 
       - uses: docker/setup-buildx-action@v3
@@ -46,6 +51,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           build-contexts: |
             amassada=./amassada-src
+            fondament=./fondament-src
           cache-from: type=gha,scope=${{ github.workflow }}
           cache-to: type=gha,mode=max,scope=${{ github.workflow }}
 
