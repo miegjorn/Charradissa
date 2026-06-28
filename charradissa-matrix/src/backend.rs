@@ -109,6 +109,11 @@ impl MatrixBackend {
                 }
             };
 
+            if system_prompt.is_empty() {
+                tracing::warn!("no system prompt resolved for '{}', skipping component room", component);
+                continue;
+            }
+
             // Create-or-join component room.
             match self.client.create_or_join_aliased_room(component, &format!("{} agent", component)).await {
                 Ok(room_id) => {
