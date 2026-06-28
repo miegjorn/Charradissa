@@ -240,6 +240,30 @@ impl AppserviceClient {
         Ok(RoomId::new(room_id))
     }
 
+    /// Join `#{alias_local}:{server_name}` if it exists; create it with `name` on 404.
+    /// Returns the room_id in both cases. Idempotent.
+    pub async fn create_or_join_aliased_room(&self, alias_local: &str, name: &str) -> Result<RoomId> {
+        let alias = format!("#{}:{}", alias_local, self.server_name);
+        let url = format!("{}/_matrix/client/v3/join/{}", self.homeserver, pct(&alias));
+        let resp = self.client.post(&url)
+            .header("Authorization", self.auth_header())
+            .json(&serde_json::json!({}))
+            .send().await
+            .map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        if resp.status().is_success() {
+            let json: serde_json::Value = resp.json().await
+                .map_err(|e| CharradissaError::Backend(e.to_string()))?;
+            let room_id = json["room_id"].as_str()
+                .ok_or_else(|| CharradissaError::Backend("no room_id in join response".into()))?;
+            return Ok(RoomId::new(room_id));
+        }
+        if resp.status().as_u16() == 404 || resp.status().as_u16() == 400 {
+            return self.create_room(alias_local, name).await;
+        }
+        let status = resp.status();
+        Err(CharradissaError::Backend(format!("create_or_join_aliased_room failed: {}", status)))
+    }
+
     pub async fn set_display_name(&self, user_id: &str, name: &str) -> Result<()> {
         let url = format!(
             "{}/_matrix/client/v3/profile/{}/displayname",
@@ -304,5 +328,83 @@ mod tests {
         assert_eq!(pct("@user:server"), "%40user%3Aserver");
         // Plain ASCII letters are passed through unchanged.
         assert_eq!(pct("plain"), "plain");
+    }
+
+    #[test]
+    fn create_or_join_aliased_room_builds_correct_alias() {
+        // The alias format must be #{local}:{server} — verify via pct encoding.
+        let alias = format!("#{}:{}", "amassada", "occitane.guilhem");
+        assert_eq!(pct(&alias), "%23amassada%3Aoccitane.guilhem");
+    }
+
+    #[tokio::test]
+    async fn create_or_join_aliased_room_joins_existing_room() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::{method, path};
+
+        let mock_server = MockServer::start().await;
+
+        // Mock the join endpoint to return success with a room_id
+        Mock::given(method("POST"))
+            .and(path("/_matrix/client/v3/join/%23amassada%3Aoccitane.guilhem"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "room_id": "!testroom:occitane.guilhem" }))
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = AppserviceClient::new(
+            mock_server.uri(),
+            "test_token".to_string(),
+            "@bot:occitane.guilhem".to_string(),
+            "occitane.guilhem".to_string(),
+        );
+
+        let result = client.create_or_join_aliased_room("amassada", "Amassada Room").await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().as_str(), "!testroom:occitane.guilhem");
+    }
+
+    #[tokio::test]
+    async fn create_or_join_aliased_room_creates_when_not_found() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::{method, path};
+
+        let mock_server = MockServer::start().await;
+
+        // Mock the join endpoint to return 400 with M_NOT_FOUND
+        Mock::given(method("POST"))
+            .and(path("/_matrix/client/v3/join/%23amassada%3Aoccitane.guilhem"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_json(serde_json::json!({
+                        "errcode": "M_NOT_FOUND",
+                        "error": "Room alias not found"
+                    }))
+            )
+            .mount(&mock_server)
+            .await;
+
+        // Mock the create room endpoint
+        Mock::given(method("POST"))
+            .and(path("/_matrix/client/v3/createRoom"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "room_id": "!newroom:occitane.guilhem" }))
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = AppserviceClient::new(
+            mock_server.uri(),
+            "test_token".to_string(),
+            "@bot:occitane.guilhem".to_string(),
+            "occitane.guilhem".to_string(),
+        );
+
+        let result = client.create_or_join_aliased_room("amassada", "Amassada Room").await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().as_str(), "!newroom:occitane.guilhem");
     }
 }
