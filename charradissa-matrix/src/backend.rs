@@ -66,6 +66,10 @@ impl MatrixBackend {
             .map_err(|e| charradissa_core::error::CharradissaError::Backend(
                 format!("Farga component list failed: {}", e)
             ))?
+            .error_for_status()
+            .map_err(|e| charradissa_core::error::CharradissaError::Backend(
+                format!("Farga component list HTTP error: {}", e)
+            ))?
             .json().await
             .map_err(|e| charradissa_core::error::CharradissaError::Backend(
                 format!("Farga component list parse failed: {}", e)
