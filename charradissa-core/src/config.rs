@@ -13,6 +13,8 @@ pub struct Config {
     pub agents: AgentsConfig,
     #[serde(default)]
     pub component_agents: Vec<ComponentAgentConfig>,
+    #[serde(default)]
+    pub provisioning: ProvisioningConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -23,6 +25,26 @@ pub struct ComponentAgentConfig {
     pub room_id: String,
     /// System prompt for this agent. Use the context field from its Fondament definition.
     pub system_prompt: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProvisioningConfig {
+    #[serde(default = "default_provisioning_projects")]
+    pub projects: Vec<String>,
+    pub fondament_url: Option<String>,
+}
+
+fn default_provisioning_projects() -> Vec<String> {
+    vec!["occitan".into()]
+}
+
+impl Default for ProvisioningConfig {
+    fn default() -> Self {
+        Self {
+            projects: default_provisioning_projects(),
+            fondament_url: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
