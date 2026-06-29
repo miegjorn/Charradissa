@@ -6,8 +6,9 @@
 /// Text that contains no block markers is returned unchanged.
 ///
 /// Multiple `[MAIN]` blocks within a single response are all kept and concatenated
-/// in order (not first-wins). An inline `[MAIN] text` where text follows on the
-/// same line is also supported — the trailing text is captured directly. The
+/// in order (not first-wins). `[MAIN]` anywhere on a line is matched — preamble text
+/// on the same line before `[MAIN]` is discarded (model reasoning that leaked before
+/// the marker), and any trailing text after `[MAIN]` on the same line is captured. The
 /// `[REQUEST_APPROVAL` entry in the discard list intentionally omits the closing
 /// `]` so that it matches any variant of the tag as a prefix (e.g.
 /// `[REQUEST_APPROVAL reason="..."]`).
@@ -36,10 +37,10 @@ pub fn strip_block_markers(text: &str) -> String {
 
     for line in text.lines() {
         let t = line.trim();
-        if t.starts_with("[MAIN]") {
+        if let Some(pos) = t.find("[MAIN]") {
             keep = true;
             skip_next_blank = true;
-            let rest = t["[MAIN]".len()..].trim();
+            let rest = t[pos + "[MAIN]".len()..].trim();
             if !rest.is_empty() {
                 lines.push(rest);
                 skip_next_blank = false;
@@ -95,6 +96,12 @@ mod tests {
     fn main_content_on_same_line() {
         let text = "[MAIN] inline reply here";
         assert_eq!(strip_block_markers(text), "inline reply here");
+    }
+
+    #[test]
+    fn main_preceded_by_preamble_on_same_line() {
+        let text = "I have reviewed the context.[MAIN]\n\nActual answer here.\n\n[LEAVE]";
+        assert_eq!(strip_block_markers(text), "Actual answer here.");
     }
 
     #[test]
