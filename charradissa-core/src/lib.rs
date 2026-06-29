@@ -1,5 +1,6 @@
 pub mod blocks;
 pub mod config;
+pub mod routing;
 pub mod registration;
 pub mod error;
 pub mod types;

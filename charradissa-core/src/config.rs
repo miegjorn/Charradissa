@@ -117,7 +117,7 @@ fn default_true() -> bool { true }
 /// type = "amassada_backed"
 /// rooms = ["!proj-room:occitane.guilhem"]
 /// project_id = "my-project"
-/// endpoint = "http://amassada:7700/sessions/{room_id}/message"
+/// endpoint = "http://amassada:7700/sessions/{session_id}/message"
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct AgentsConfig {
@@ -146,7 +146,10 @@ pub struct ProjectAgentConfig {
     pub rooms: Vec<String>,
     /// The project identifier transmitted to Amassada in every turn.
     pub project_id: String,
-    /// Amassada endpoint template.  `{room_id}` is substituted at call time.
+    /// Amassada endpoint template.  `{session_id}` is substituted at call time with
+    /// a stable, URL-safe session handle derived from the room
+    /// (`crate::routing::project_session_id`); `{room_id}` is also substituted with
+    /// the raw room id for backward compatibility with older templates.
     pub endpoint: String,
 }
 

@@ -17,7 +17,7 @@ endpoint = "http://amassada:7700/sessions/{room_id}/message"
 type = "amassada_backed"
 rooms = ["!proj-c:occitane.guilhem"]
 project_id = "beta"
-endpoint = "http://amassada:7700/sessions/{room_id}/message"
+endpoint = "http://amassada:7700/sessions/{session_id}/message"
 "#;
 
 #[derive(serde::Deserialize)]
@@ -56,12 +56,14 @@ fn empty_project_config_is_valid() {
 }
 
 #[test]
-fn project_endpoint_template_contains_room_id_placeholder() {
+fn project_endpoint_template_contains_substitution_placeholder() {
+    // Both the preferred {session_id} handle and the legacy {room_id} form must
+    // parse and round-trip — Charradissa substitutes whichever the template uses.
     let cfg = parse(AGENTS_WITH_PROJECT);
     for entry in &cfg.project {
         assert!(
-            entry.endpoint.contains("{room_id}"),
-            "endpoint '{}' must contain {{room_id}} for substitution",
+            entry.endpoint.contains("{session_id}") || entry.endpoint.contains("{room_id}"),
+            "endpoint '{}' must contain a {{session_id}} or {{room_id}} placeholder",
             entry.endpoint
         );
     }
