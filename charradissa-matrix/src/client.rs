@@ -502,6 +502,18 @@ mod tests {
     }
 
     #[test]
+    fn mermaid_fence_produces_language_mermaid_class() {
+        // Element Web renders <pre><code class="language-mermaid"> as a diagram.
+        // pulldown-cmark preserves the fence language as a CSS class, so Mermaid
+        // just works without any extra handling.
+        let md = "```mermaid\ngraph LR\n  A --> B\n```";
+        let body = markdown_body(md);
+        assert_eq!(body["format"], "org.matrix.custom.html");
+        let html = body["formatted_body"].as_str().unwrap();
+        assert!(html.contains(r#"class="language-mermaid""#), "got: {html}");
+    }
+
+    #[test]
     fn bullet_list_produces_formatted_body() {
         let body = markdown_body("- item one\n- item two");
         assert_eq!(body["format"], "org.matrix.custom.html");
