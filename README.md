@@ -152,6 +152,34 @@ Matrix Space: <org>
 └── #<org>-general                    OrgAgent, ConciergeAgent (silent)
 ```
 
+### Startup provisioning & power levels
+
+At startup the daemon (`charradissa-daemon/src/main.rs`) provisions rooms idempotently, in order:
+
+1. **Project & component rooms** (`MatrixBackend::provision_project_rooms`): for each
+   configured project, create-or-join the project room and one room per component
+   agent discovered from Farga.
+   - **Component rooms grant the owning agent PL 100** at creation time
+     (`m.room.power_levels`), while Guilhem — the appservice sender, `@charradissa`,
+     displayed as "Guilhem" — is set to PL 50 (moderator). Every component agent also
+     gets PL 50 (kick power) in every room. This is applied in
+     `AppserviceClient::create_room_with_owner`, so the *8th and later* component
+     rooms are correctly configured at creation, not just retroactively.
+   - The component named `charradissa` maps to the agent localpart `charradissa-agent`
+     (the bare `charradissa` localpart is the appservice sender).
+
+2. **DM fabric** (`MatrixBackend::provision_dm_rooms`): ensure a direct room exists
+   between Guilhem (the appservice sender) and each of the seven component agents.
+   Each DM is created with `is_direct: true` and recorded in the sender's `m.direct`
+   account_data, which is the **idempotency source of truth** — partners already
+   recorded there are reused, never re-created. Room IDs are also written to Farga
+   (project `occitan`) as an observability signal. There is no separate `@guilhem`
+   Matrix user; on the wire Guilhem *is* the appservice sender.
+
+3. **Kick power** (`MatrixBackend::provision_agent_kick_power`): grant PL 50 to every
+   component agent in every room the daemon is currently in (covers pre-existing
+   rooms). Idempotent — rooms already at PL ≥ 50 are left untouched.
+
 ---
 
 ## ConciergeAgent
