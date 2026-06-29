@@ -38,10 +38,21 @@ impl AppserviceClient {
     }
 
     pub async fn send_message(&self, room_id: &RoomId, content: &str) -> Result<()> {
-        let url = format!(
+        self.send_message_as(room_id, content, None).await
+    }
+
+    /// Send a message optionally impersonating a virtual user in the appservice namespace.
+    /// When `sender_localpart` is Some, adds `?user_id=@{localpart}:{server_name}` so the
+    /// message appears as that user rather than the appservice bot.
+    pub async fn send_message_as(&self, room_id: &RoomId, content: &str, sender_localpart: Option<&str>) -> Result<()> {
+        let mut url = format!(
             "{}/_matrix/client/v3/rooms/{}/send/m.room.message/{}",
             self.homeserver, pct(room_id.as_str()), uuid::Uuid::new_v4()
         );
+        if let Some(localpart) = sender_localpart {
+            let mxid = format!("@{}:{}", localpart, self.server_name);
+            url.push_str(&format!("?user_id={}", pct(&mxid)));
+        }
         let body = markdown_body(content);
         let resp = self.client.put(&url)
             .header("Authorization", self.auth_header())

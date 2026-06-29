@@ -268,6 +268,10 @@ impl ChatBackend for MatrixBackend {
         self.client.send_message(room, content).await
     }
 
+    async fn send_message_as(&self, room: &RoomId, content: &str, sender_localpart: Option<&str>) -> Result<()> {
+        self.client.send_message_as(room, content, sender_localpart).await
+    }
+
     async fn send_dm(&self, user: &UserId, content: &str) -> Result<()> {
         tracing::debug!("DM to {}: {}", user, content);
         Ok(())

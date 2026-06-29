@@ -7,6 +7,12 @@ use crate::types::{ChatEvent, CompositionAddress, RoomId, RoomOptions, SpaceId, 
 #[async_trait]
 pub trait ChatBackend: Send + Sync {
     async fn send_message(&self, room: &RoomId, content: &str) -> Result<()>;
+    /// Send as a specific virtual user in the appservice namespace.
+    /// Default delegates to `send_message` (ignores `sender_localpart`).
+    async fn send_message_as(&self, room: &RoomId, content: &str, sender_localpart: Option<&str>) -> Result<()> {
+        let _ = sender_localpart;
+        self.send_message(room, content).await
+    }
     async fn send_dm(&self, user: &UserId, content: &str) -> Result<()>;
     async fn create_room(&self, opts: &RoomOptions) -> Result<RoomId>;
     async fn create_space(&self, name: &str) -> Result<SpaceId>;

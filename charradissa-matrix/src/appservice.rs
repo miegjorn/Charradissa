@@ -155,6 +155,9 @@ pub async fn handle_transaction(
                 .get(ev.room_id.as_str())
                 .cloned()
                 .unwrap_or_else(|| state.default_agent_url.clone());
+            // For component agent rooms, send replies as the component's virtual user
+            // rather than @charradissa, since Guilhem is not a member of those rooms.
+            let component_sender = sender_from_agent_url(&agent_url);
             let (agent_url, backend, self_user_id) = (agent_url, state.backend.clone(), state.self_user_id.clone());
             tokio::spawn(async move {
                 let history = backend
@@ -162,10 +165,11 @@ pub async fn handle_transaction(
                     .await
                     .unwrap_or_default();
 
-                // Signal to the client that Guilhem is thinking. This keeps the long-poll
-                // sync connection alive so the response arrives without requiring a second
-                // message from the user (Charradissa#27).
-                let _ = backend.set_typing(&ev.room_id, &self_user_id, true, 120_000).await;
+                // Typing indicator only when sending as @charradissa (i.e. Guilhem's own rooms).
+                // Component rooms: @charradissa is not a member so set_typing would 403.
+                if component_sender.is_none() {
+                    let _ = backend.set_typing(&ev.room_id, &self_user_id, true, 120_000).await;
+                }
 
                 const MAX_ATTEMPTS: u32 = 3;
                 const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
@@ -183,26 +187,27 @@ pub async fn handle_transaction(
                     attempt += 1;
                 }
 
-                // Clear typing indicator before posting the reply (or error message).
-                let _ = backend.set_typing(&ev.room_id, &self_user_id, false, 0).await;
+                if component_sender.is_none() {
+                    let _ = backend.set_typing(&ev.room_id, &self_user_id, false, 0).await;
+                }
 
+                let sender = component_sender.as_deref();
                 match result {
                     Ok(text) if !text.trim().is_empty() => {
                         let text = strip_block_markers(&text);
-                        if let Err(e) = backend.send_message(&ev.room_id, &text).await {
+                        if let Err(e) = backend.send_message_as(&ev.room_id, &text, sender).await {
                             tracing::error!("agent send failed: {}", e);
                         }
                     }
                     Ok(_) => tracing::warn!("agent produced an empty reply"),
                     Err(e) => {
                         tracing::error!("agent reply failed after {} attempts: {}", MAX_ATTEMPTS, e);
-                        if let Err(send_err) = backend
-                            .send_message(
-                                &ev.room_id,
-                                "\u{26A0} Guilhem is unreachable right now — please try again in a moment.",
-                            )
-                            .await
-                        {
+                        let msg = if sender.is_some() {
+                            "\u{26A0} This agent is unreachable right now — please try again in a moment."
+                        } else {
+                            "\u{26A0} Guilhem is unreachable right now — please try again in a moment."
+                        };
+                        if let Err(send_err) = backend.send_message_as(&ev.room_id, msg, sender).await {
                             tracing::error!("fallback message send failed: {}", send_err);
                         }
                     }
@@ -211,6 +216,15 @@ pub async fn handle_transaction(
         }
     }
     (StatusCode::OK, ack())
+}
+
+/// Derive the Matrix localpart of the component agent from its service URL.
+/// `http://farga-agent.agents.svc.cluster.local:8080` → `Some("farga")`
+/// Returns None for the default Guilhem URL (no `-agent` suffix pattern).
+fn sender_from_agent_url(url: &str) -> Option<String> {
+    let host = url.split("://").nth(1)?.split('/').next()?.split(':').next()?;
+    let first = host.split('.').next()?;
+    first.strip_suffix("-agent").map(str::to_string)
 }
 
 async fn call_agent(agent_url: &str, history: &[ChatEvent], ev: &ChatEvent) -> Result<String, String> {
