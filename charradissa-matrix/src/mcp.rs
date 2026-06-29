@@ -90,11 +90,11 @@ impl MatrixMcp {
             }),
             json!({
                 "name": "matrix_get_dm",
-                "description": "Resolve the DM room ID for a component agent identity (e.g. \"farga\").",
+                "description": "Resolve the DM room ID for any user — component agent (e.g. \"farga\") or human (e.g. \"@pierre-luc:occitane.guilhem\"). Checks the agent registry first; if not found, scans joined rooms for a 2-member room shared with that user.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "agent": {"type": "string", "description": "Component agent localpart or MXID, e.g. farga or @farga:occitane.guilhem"}
+                        "agent": {"type": "string", "description": "Localpart, e.g. pierre-luc, or full MXID e.g. @pierre-luc:occitane.guilhem"}
                     },
                     "required": ["agent"]
                 }
@@ -196,13 +196,23 @@ impl MatrixMcp {
             }
             "matrix_get_dm" => {
                 let agent = required_str(args, "agent")?;
-                match self.dm_registry.resolve(agent) {
-                    Some(room_id) => Ok(room_id.to_string()),
-                    None => Err(format!(
-                        "no DM room registered for agent '{agent}' (registry has {} entries; \
-                         is Charradissa#22 DM provisioning configured?)",
-                        self.dm_registry.len()
+                // Registry covers component agents; fall back to room scan for humans.
+                if let Some(room_id) = self.dm_registry.resolve(agent) {
+                    return Ok(room_id.to_string());
+                }
+                // Normalise to full MXID for the scan.
+                let mxid = if agent.starts_with('@') {
+                    agent.to_string()
+                } else {
+                    format!("@{}:{}", agent, self.client.server_name())
+                };
+                match self.client.find_dm_room(&mxid).await {
+                    Ok(Some(room_id)) => Ok(room_id.to_string()),
+                    Ok(None) => Err(format!(
+                        "no DM room found with '{mxid}' — not in agent registry and no \
+                         2-member joined room shared with that user exists"
                     )),
+                    Err(e) => Err(format!("DM room scan failed: {e}")),
                 }
             }
             "matrix_leave" => {

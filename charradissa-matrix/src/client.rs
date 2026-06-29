@@ -321,6 +321,32 @@ impl AppserviceClient {
         Ok(())
     }
 
+    /// Find a DM room shared with `target_user_id` by scanning joined rooms for one
+    /// that has exactly 2 members: the appservice bot and the target user.
+    /// Returns `None` if no such room is found.
+    pub async fn find_dm_room(&self, target_user_id: &str) -> Result<Option<RoomId>> {
+        let rooms = self.joined_rooms().await?;
+        for room in rooms {
+            let url = format!(
+                "{}/_matrix/client/v3/rooms/{}/joined_members",
+                self.homeserver, pct(room.as_str())
+            );
+            let resp = self.client.get(&url)
+                .header("Authorization", self.auth_header())
+                .send().await
+                .map_err(|e| CharradissaError::Backend(e.to_string()))?;
+            let Ok(json) = resp.json::<serde_json::Value>().await else { continue };
+            let Some(joined) = json["joined"].as_object() else { continue };
+            if joined.len() == 2
+                && joined.contains_key(target_user_id)
+                && joined.contains_key(&self.bot_user_id)
+            {
+                return Ok(Some(room));
+            }
+        }
+        Ok(None)
+    }
+
     pub async fn room_messages(&self, room: &RoomId, limit: u32) -> Result<serde_json::Value> {
         let url = format!("{}/_matrix/client/v3/rooms/{}/messages?dir=b&limit={}",
             self.homeserver, pct(room.as_str()), limit);
