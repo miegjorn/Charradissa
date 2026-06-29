@@ -152,13 +152,20 @@ impl AppserviceClient {
     pub async fn invite(&self, room_id: &RoomId, user_id: &UserId) -> Result<()> {
         let url = format!(
             "{}/_matrix/client/v3/rooms/{}/invite",
-            self.homeserver, room_id.as_str()
+            self.homeserver, pct(room_id.as_str())
         );
-        self.client.post(&url)
+        let resp = self.client.post(&url)
             .header("Authorization", self.auth_header())
             .json(&serde_json::json!({ "user_id": user_id.as_str() }))
             .send().await
             .map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        // Surface Synapse's rejection (e.g. M_FORBIDDEN when the appservice's power
+        // level is insufficient) instead of silently succeeding — matrix_invite must
+        // fail gracefully and report the boundary.
+        if !resp.status().is_success() {
+            let status = resp.status();
+            return Err(CharradissaError::Backend(format!("invite failed: {}", status)));
+        }
         Ok(())
     }
 

@@ -4,6 +4,7 @@ pub mod routing;
 pub mod registration;
 pub mod error;
 pub mod types;
+pub mod dm_registry;
 pub mod backend;
 pub mod task;
 pub mod farga;
