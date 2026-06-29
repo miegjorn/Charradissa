@@ -5,6 +5,7 @@ use charradissa_core::config::ProjectAgentConfig;
 use charradissa_core::responder::{should_respond, Responder};
 use charradissa_core::types::{ChatEvent, ChatEventKind, RoomId, UserId};
 use chrono::Utc;
+use crate::client::AGENT_LOCAL_PARTS;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -77,6 +78,11 @@ pub async fn handle_transaction(
 
         if let Some(ev) = parse_matrix_event(&raw) {
             if !should_respond(&ev, &state.self_user_id) {
+                continue;
+            }
+            // Also ignore messages sent by appservice-managed virtual users
+            // (e.g. @farga, @gardian) — they are our own echoes.
+            if is_appservice_sender(ev.sender.as_str(), &state.self_user_id) {
                 continue;
             }
 
@@ -225,6 +231,18 @@ fn sender_from_agent_url(url: &str) -> Option<String> {
     let host = url.split("://").nth(1)?.split('/').next()?.split(':').next()?;
     let first = host.split('.').next()?;
     first.strip_suffix("-agent").map(str::to_string)
+}
+
+/// Returns true when the event sender is an appservice-managed virtual user
+/// (i.e. any @*:server user in the same server namespace as self_user_id).
+/// These are our own echoes and must not trigger a new agent call.
+fn is_appservice_sender(sender: &str, self_user_id: &str) -> bool {
+    // self_user_id is e.g. "@charradissa:occitane.guilhem"
+    // Extract the server part: "occitane.guilhem"
+    let Some(self_server) = self_user_id.split(':').nth(1) else { return false };
+    // Virtual users managed by this appservice are AGENT_LOCAL_PARTS@server
+    sender.ends_with(&format!(":{}", self_server))
+        && AGENT_LOCAL_PARTS.iter().any(|lp| sender == format!("@{}:{}", lp, self_server))
 }
 
 async fn call_agent(agent_url: &str, history: &[ChatEvent], ev: &ChatEvent) -> Result<String, String> {
