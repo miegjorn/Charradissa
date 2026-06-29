@@ -236,6 +236,23 @@ impl AppserviceClient {
         Ok(())
     }
 
+    pub async fn leave_room(&self, room_id: &RoomId) -> Result<()> {
+        let url = format!(
+            "{}/_matrix/client/v3/rooms/{}/leave",
+            self.homeserver, pct(room_id.as_str())
+        );
+        let resp = self.client.post(&url)
+            .header("Authorization", self.auth_header())
+            .json(&serde_json::json!({}))
+            .send().await
+            .map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            return Err(CharradissaError::Backend(format!("leave failed: {}", status)));
+        }
+        Ok(())
+    }
+
     pub async fn invite(&self, room_id: &RoomId, user_id: &UserId) -> Result<()> {
         let url = format!(
             "{}/_matrix/client/v3/rooms/{}/invite",
