@@ -42,7 +42,7 @@ impl AppserviceClient {
             "{}/_matrix/client/v3/rooms/{}/send/m.room.message/{}",
             self.homeserver, pct(room_id.as_str()), uuid::Uuid::new_v4()
         );
-        let body = serde_json::json!({ "msgtype": "m.text", "body": content });
+        let body = markdown_body(content);
         let resp = self.client.put(&url)
             .header("Authorization", self.auth_header())
             .json(&body)
@@ -413,6 +413,51 @@ pub fn user_id(local_part: &str, server_name: &str) -> UserId {
     UserId::new(&format!("@{}:{}", local_part, server_name))
 }
 
+/// Build a Matrix `m.room.message` body for `content`.
+///
+/// If the content renders to HTML that differs from the plain text (i.e. the
+/// content actually contains markdown), the body includes `format` and
+/// `formatted_body` so Matrix clients render it. Otherwise plain text only.
+fn markdown_body(content: &str) -> serde_json::Value {
+    let html = render_markdown(content);
+    // Only send formatted_body when there is actual markup — avoids cluttering
+    // plain-prose messages with an identical HTML copy.
+    if html_differs_from_plain(content, &html) {
+        serde_json::json!({
+            "msgtype": "m.text",
+            "body": content,
+            "format": "org.matrix.custom.html",
+            "formatted_body": html,
+        })
+    } else {
+        serde_json::json!({ "msgtype": "m.text", "body": content })
+    }
+}
+
+fn render_markdown(content: &str) -> String {
+    use pulldown_cmark::{html, Options, Parser};
+    let opts = Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS;
+    let parser = Parser::new_ext(content, opts);
+    let mut html_out = String::new();
+    html::push_html(&mut html_out, parser);
+    html_out
+}
+
+/// Returns true when the rendered HTML adds something beyond a plain paragraph
+/// wrap (pulldown-cmark wraps bare text in `<p>…</p>\n` even with no markdown).
+fn html_differs_from_plain(plain: &str, html: &str) -> bool {
+    // Normalise: strip the outer <p>…</p>\n that pulldown-cmark adds to any
+    // single-paragraph input, then compare to the original.
+    let trimmed = html.trim();
+    let unwrapped = trimmed
+        .strip_prefix("<p>")
+        .and_then(|s| s.strip_suffix("</p>"))
+        .unwrap_or(trimmed);
+    unwrapped != plain.trim()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,6 +466,59 @@ mod tests {
     fn user_id_uses_server_name_not_url() {
         // server_name is occitane.guilhem even though the HTTP host is synapse:8008
         assert_eq!(user_id("guilhem", "occitane.guilhem").as_str(), "@guilhem:occitane.guilhem");
+    }
+
+    // ── markdown_body ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn plain_prose_has_no_formatted_body() {
+        let body = markdown_body("hello world");
+        assert!(body.get("formatted_body").is_none());
+        assert!(body.get("format").is_none());
+        assert_eq!(body["body"], "hello world");
+    }
+
+    #[test]
+    fn bold_text_produces_formatted_body() {
+        let body = markdown_body("**important**");
+        assert_eq!(body["format"], "org.matrix.custom.html");
+        let html = body["formatted_body"].as_str().unwrap();
+        assert!(html.contains("<strong>important</strong>"), "got: {html}");
+    }
+
+    #[test]
+    fn code_block_produces_formatted_body() {
+        let body = markdown_body("```rust\nfn main() {}\n```");
+        assert_eq!(body["format"], "org.matrix.custom.html");
+        let html = body["formatted_body"].as_str().unwrap();
+        assert!(html.contains("<pre><code"), "got: {html}");
+    }
+
+    #[test]
+    fn plain_body_preserved_alongside_html() {
+        let md = "**bold** text";
+        let body = markdown_body(md);
+        assert_eq!(body["body"], md);
+    }
+
+    #[test]
+    fn mermaid_fence_produces_language_mermaid_class() {
+        // Element Web renders <pre><code class="language-mermaid"> as a diagram.
+        // pulldown-cmark preserves the fence language as a CSS class, so Mermaid
+        // just works without any extra handling.
+        let md = "```mermaid\ngraph LR\n  A --> B\n```";
+        let body = markdown_body(md);
+        assert_eq!(body["format"], "org.matrix.custom.html");
+        let html = body["formatted_body"].as_str().unwrap();
+        assert!(html.contains(r#"class="language-mermaid""#), "got: {html}");
+    }
+
+    #[test]
+    fn bullet_list_produces_formatted_body() {
+        let body = markdown_body("- item one\n- item two");
+        assert_eq!(body["format"], "org.matrix.custom.html");
+        let html = body["formatted_body"].as_str().unwrap();
+        assert!(html.contains("<ul>") && html.contains("<li>"), "got: {html}");
     }
 
     #[test]
