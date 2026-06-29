@@ -8,12 +8,12 @@
 //! The user namespace covers three kinds of identity:
 //!   1. the daemon's own sender (`@charradissa`);
 //!   2. specialist virtual users (`@charradissa-<project>`);
-//!   3. the seven component agents, each of which responds as its own Matrix
+//!   3. the eight component agents, each of which responds as its own Matrix
 //!      identity rather than as `@charradissa`.
 
-/// The seven Occitan-stack component agents. Each needs its own exclusive entry
+/// The eight Occitan-stack component agents. Each needs its own exclusive entry
 /// in the appservice user namespace so it can speak as itself in its room.
-pub const COMPONENT_AGENT_LOCALPARTS: [&str; 7] = [
+pub const COMPONENT_AGENT_LOCALPARTS: [&str; 8] = [
     "gardian",
     "fondament",
     "farga",
@@ -21,6 +21,7 @@ pub const COMPONENT_AGENT_LOCALPARTS: [&str; 7] = [
     "cor",
     "caissa",
     "charradissa-agent",
+    "nervi",
 ];
 
 /// Inputs for [`generate_registration`].

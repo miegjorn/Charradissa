@@ -1,7 +1,7 @@
 //! Tests for appservice registration generation.
 //!
-//! The seven component agents (@gardian, @fondament, @farga, @amassada, @cor,
-//! @caissa, @charradissa-agent) must each appear in the appservice user
+//! The eight component agents (@gardian, @fondament, @farga, @amassada, @cor,
+//! @caissa, @charradissa-agent, @nervi) must each appear in the appservice user
 //! namespace so they can respond as their own Matrix identity rather than as
 //! @charradissa.
 
@@ -25,9 +25,9 @@ fn sample_params() -> RegistrationParams {
 }
 
 #[test]
-fn there_are_seven_canonical_component_agents() {
-    assert_eq!(COMPONENT_AGENT_LOCALPARTS.len(), 7);
-    for lp in ["gardian", "fondament", "farga", "amassada", "cor", "caissa", "charradissa-agent"] {
+fn there_are_eight_canonical_component_agents() {
+    assert_eq!(COMPONENT_AGENT_LOCALPARTS.len(), 8);
+    for lp in ["gardian", "fondament", "farga", "amassada", "cor", "caissa", "charradissa-agent", "nervi"] {
         assert!(
             COMPONENT_AGENT_LOCALPARTS.contains(&lp),
             "canonical component agent {lp} is missing"

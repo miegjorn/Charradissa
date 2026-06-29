@@ -6,7 +6,7 @@ use charradissa_core::types::{RoomId, UserId};
 /// Kept here as the canonical source — matches charradissa-registration.yaml namespaces.
 /// Charradissa sets these users to PL 50 (kick power) in every room it creates or joins.
 pub const AGENT_LOCAL_PARTS: &[&str] = &[
-    "gardian", "fondament", "farga", "amassada", "cor", "caissa", "charradissa-agent",
+    "gardian", "fondament", "farga", "amassada", "cor", "caissa", "charradissa-agent", "nervi",
 ];
 
 pub struct AppserviceClient {
