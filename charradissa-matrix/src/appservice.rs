@@ -256,9 +256,15 @@ async fn call_agent(agent_url: &str, history: &[ChatEvent], ev: &ChatEvent) -> R
 
 /// POST a turn to an Amassada project endpoint.
 ///
-/// The endpoint template has `{room_id}` substituted with the actual room ID.
-/// The body carries `project_id` so Amassada can resolve the right persona via
-/// its project registry (A-1).  The response format is `{ "text": "..." }`.
+/// The endpoint template's `{session_id}` placeholder is substituted with a stable,
+/// URL-safe session handle derived from the room (see
+/// [`charradissa_core::routing::project_session_id`]): the same room reuses the same
+/// Amassada session across turns and restarts. `{room_id}` is also substituted (with
+/// the raw room id) for backward compatibility with older endpoint templates.
+///
+/// The body carries both `room_id` — which Amassada uses to resolve the project from
+/// its registry (Amassada#11) — and `project_id`, the project Charradissa resolved
+/// from its own routing table. The response format is `{ "text": "..." }`.
 async fn call_project_agent(
     endpoint_template: &str,
     project_id: &str,
@@ -283,7 +289,10 @@ async fn call_project_agent(
         text: String,
     }
 
-    let url = endpoint_template.replace("{room_id}", ev.room_id.as_str());
+    let session_id = charradissa_core::routing::project_session_id(ev.room_id.as_str());
+    let url = endpoint_template
+        .replace("{session_id}", &session_id)
+        .replace("{room_id}", ev.room_id.as_str());
     let req = Req {
         room_id: ev.room_id.as_str(),
         sender: ev.sender.as_str(),
@@ -426,6 +435,60 @@ mod tests {
             "room_id must be present in the turn body");
         assert_eq!(json["content"].as_str(), Some("hello project"),
             "content must be present in the turn body");
+    }
+
+    #[tokio::test]
+    async fn call_project_agent_uses_stable_session_id_in_path() {
+        use axum::{extract::{Path, State}, Json, Router, routing::post};
+        use charradissa_core::types::{ChatEventKind, RoomId, UserId};
+        use chrono::Utc;
+        use std::sync::{Arc, Mutex};
+
+        // Capture the `:session_id` path segment the request actually hits.
+        type Captured = Arc<Mutex<Option<String>>>;
+        let captured: Captured = Arc::new(Mutex::new(None));
+        let captured_clone = captured.clone();
+
+        let app = Router::new()
+            .route(
+                "/sessions/:session_id/message",
+                post(|Path(session_id): Path<String>, State(cap): State<Captured>, Json(_): Json<serde_json::Value>| async move {
+                    *cap.lock().unwrap() = Some(session_id);
+                    Json(serde_json::json!({"text": "pong"}))
+                }),
+            )
+            .with_state(captured_clone);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let room = "!proj-a:occitane.guilhem";
+        let ev = ChatEvent {
+            event_id: "$e1".into(),
+            room_id: RoomId::new(room),
+            sender: UserId::new("@user:server"),
+            content: "hello".into(),
+            timestamp: Utc::now(),
+            kind: ChatEventKind::Message,
+        };
+
+        // Endpoint template uses the new {session_id} placeholder.
+        let endpoint = format!("http://{}/sessions/{{session_id}}/message", addr);
+        let result = call_project_agent(&endpoint, "alpha", &[], &ev).await;
+        assert_eq!(result.as_deref().ok(), Some("pong"), "expected pong from mock server");
+
+        let path_session = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            path_session,
+            charradissa_core::routing::project_session_id(room),
+            "URL path must carry the derived stable session id"
+        );
+        assert!(path_session.starts_with("project-"));
+        assert!(
+            !path_session.contains('!') && !path_session.contains(':'),
+            "the raw Matrix room id must not leak into the session path"
+        );
     }
 }
 

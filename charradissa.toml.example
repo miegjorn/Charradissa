@@ -35,11 +35,13 @@ default = "http://guilhem.agents.svc.cluster.local:8080"
 # Project-backed agents: each [[agents.project]] entry maps one or more Matrix
 # rooms to an Amassada endpoint. Charradissa injects project_id into the turn
 # body so Amassada can resolve the right persona from its project registry.
+# {session_id} expands to a stable, URL-safe handle derived from the room, so the
+# project's conversation reuses the same Amassada session across turns.
 [[agents.project]]
 type = "amassada_backed"
 rooms = ["!room-projet-a:occitane.guilhem"]
 project_id = "my-project"
-endpoint = "http://amassada.agents.svc.cluster.local:7700/sessions/{room_id}/message"
+endpoint = "http://amassada.agents.svc.cluster.local:7700/sessions/{session_id}/message"
 
 # Component agents (in-process): wire a room to a Responder without a separate
 # HTTP pod. Useful for lightweight helpers that don't need their own container.

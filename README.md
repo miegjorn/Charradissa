@@ -325,7 +325,7 @@ default = "http://guilhem.agents.svc.cluster.local:8080"   # fallback for unmatc
 type       = "amassada_backed"
 rooms      = ["!room-projet-a:occitane.guilhem"]
 project_id = "my-project"
-endpoint   = "http://amassada.agents.svc.cluster.local:7700/sessions/{room_id}/message"
+endpoint   = "http://amassada.agents.svc.cluster.local:7700/sessions/{session_id}/message"
 ```
 
 ### Component agents (in-process responders)
@@ -431,10 +431,10 @@ Every inbound Matrix event is dispatched through one of three paths, checked in 
 
 1. **Project-agent path (`[[agents.project]]`)** — if the event's room ID matches an entry in `project_routes`, Charradissa POSTs to the configured Amassada endpoint:
    ```
-   POST http://amassada:7700/sessions/{room_id}/message
+   POST http://amassada:7700/sessions/{session_id}/message
    Body: { "content": "...", "sender": "...", "room_id": "...", "project_id": "..." }
    ```
-   The `{room_id}` placeholder in the endpoint template is substituted with the actual room ID. `project_id` is injected so Amassada can resolve the right persona via its project registry.
+   The `{session_id}` placeholder is substituted with a stable, URL-safe session handle derived from the room (`project-<hash>`, see `charradissa_core::routing::project_session_id`), so the project's conversation reuses the same Amassada session across turns and restarts. (`{room_id}` is still substituted with the raw room id for backward compatibility with older templates.) The `room_id` carried in the body is what Amassada uses to resolve the project from its registry; `project_id` is injected as the project Charradissa resolved from its own routing table.
 
 2. **Component-agent path (`[agents.routes]`)** — if the room ID matches an entry in `agent_routes`, Charradissa POSTs to that component pod's endpoint:
    ```
