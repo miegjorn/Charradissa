@@ -56,17 +56,41 @@ impl AppserviceClient {
     }
 
     pub async fn create_room(&self, alias: &str, name: &str) -> Result<RoomId> {
+        self.create_room_with_owner(alias, name, None).await
+    }
+
+    /// Create an aliased room with power levels preset at creation time.
+    ///
+    /// All component agents get PL 50 (kick power) in every room (story #19).
+    /// When `owner_localpart` is `Some`, the room is a component room and that
+    /// agent is its owner — granted PL 100 — while the appservice sender
+    /// (Guilhem, `@charradissa`) is set to PL 50 (moderator). This is Charradissa
+    /// #20: future component rooms are correctly configured at creation, not
+    /// retroactively. When `owner_localpart` is `None` (project rooms, etc.) the
+    /// sender keeps its default creator power level (PL 100).
+    pub async fn create_room_with_owner(
+        &self,
+        alias: &str,
+        name: &str,
+        owner_localpart: Option<&str>,
+    ) -> Result<RoomId> {
         let url = format!("{}/_matrix/client/v3/createRoom", self.homeserver);
-        // Pre-set power levels at creation: all component agents get PL 50 (kick power).
-        // The bot_user_id (sender) is already PL 100 as the room creator.
-        let agent_users: serde_json::Value = AGENT_LOCAL_PARTS.iter()
+        // Base: every component agent gets PL 50 (kick power).
+        let mut users: serde_json::Map<String, serde_json::Value> = AGENT_LOCAL_PARTS.iter()
             .map(|lp| (format!("@{}:{}", lp, self.server_name), serde_json::json!(50)))
-            .collect::<serde_json::Map<_, _>>()
-            .into();
+            .collect();
+        if let Some(owner) = owner_localpart {
+            // The owning component agent is the room admin (PL 100).
+            users.insert(format!("@{}:{}", owner, self.server_name), serde_json::json!(100));
+            // Guilhem (the appservice sender) is a moderator here, not the admin.
+            // The sender sets these levels as room creator at creation time.
+            users.insert(self.bot_user_id.clone(), serde_json::json!(50));
+        }
+        let users: serde_json::Value = users.into();
         let body = serde_json::json!({
             "room_alias_name": alias,
             "name": name,
-            "power_level_content_override": { "users": agent_users, "kick": 50 }
+            "power_level_content_override": { "users": users, "kick": 50 }
         });
         let resp = self.client.post(&url)
             .header("Authorization", self.auth_header())
@@ -78,6 +102,69 @@ impl AppserviceClient {
         let room_id = json["room_id"].as_str()
             .ok_or_else(|| CharradissaError::Backend("no room_id in response".into()))?;
         Ok(RoomId::new(room_id))
+    }
+
+    /// Create a direct-message (1:1) room and invite `partner_user_id`.
+    ///
+    /// Unlike [`create_room_with_owner`] this sets no alias and no power-level
+    /// override: it sends `is_direct: true` with the `trusted_private_chat`
+    /// preset so the invited partner shares control of the DM. Used by the DM
+    /// fabric (Charradissa #22).
+    pub async fn create_dm_room(&self, partner_user_id: &str) -> Result<RoomId> {
+        let url = format!("{}/_matrix/client/v3/createRoom", self.homeserver);
+        let body = serde_json::json!({
+            "is_direct": true,
+            "preset": "trusted_private_chat",
+            "invite": [partner_user_id],
+        });
+        let resp = self.client.post(&url)
+            .header("Authorization", self.auth_header())
+            .json(&body)
+            .send().await
+            .map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        let json: serde_json::Value = resp.json().await
+            .map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        let room_id = json["room_id"].as_str()
+            .ok_or_else(|| CharradissaError::Backend("no room_id in DM create response".into()))?;
+        Ok(RoomId::new(room_id))
+    }
+
+    /// Read a user's account_data event of `event_type`. Returns an empty JSON
+    /// object when the event does not exist (HTTP 404) so callers can treat
+    /// "never set" and "set to empty" uniformly.
+    pub async fn get_account_data(&self, user_id: &str, event_type: &str) -> Result<serde_json::Value> {
+        let url = format!(
+            "{}/_matrix/client/v3/user/{}/account_data/{}",
+            self.homeserver, pct(user_id), event_type
+        );
+        let resp = self.client.get(&url)
+            .header("Authorization", self.auth_header())
+            .send().await
+            .map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        if resp.status().as_u16() == 404 {
+            return Ok(serde_json::json!({}));
+        }
+        let resp = resp.error_for_status()
+            .map_err(|e| CharradissaError::Backend(format!("get_account_data: {}", e)))?;
+        resp.json().await.map_err(|e| CharradissaError::Backend(e.to_string()))
+    }
+
+    /// Write a user's account_data event of `event_type`.
+    pub async fn set_account_data(&self, user_id: &str, event_type: &str, value: &serde_json::Value) -> Result<()> {
+        let url = format!(
+            "{}/_matrix/client/v3/user/{}/account_data/{}",
+            self.homeserver, pct(user_id), event_type
+        );
+        let resp = self.client.put(&url)
+            .header("Authorization", self.auth_header())
+            .json(value)
+            .send().await
+            .map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            return Err(CharradissaError::Backend(format!("set_account_data failed: {}", status)));
+        }
+        Ok(())
     }
 
     /// Read the current m.room.power_levels state for a room.
@@ -246,7 +333,12 @@ impl AppserviceClient {
 
     /// Join `#{alias_local}:{server_name}` if it exists; create it with `name` on 404.
     /// Returns the room_id in both cases. Idempotent.
-    pub async fn create_or_join_aliased_room(&self, alias_local: &str, name: &str) -> Result<RoomId> {
+    pub async fn create_or_join_aliased_room(
+        &self,
+        alias_local: &str,
+        name: &str,
+        owner_localpart: Option<&str>,
+    ) -> Result<RoomId> {
         let alias = format!("#{}:{}", alias_local, self.server_name);
         let url = format!("{}/_matrix/client/v3/join/{}", self.homeserver, pct(&alias));
         let resp = self.client.post(&url)
@@ -262,7 +354,7 @@ impl AppserviceClient {
             return Ok(RoomId::new(room_id));
         }
         if resp.status().as_u16() == 404 || resp.status().as_u16() == 400 {
-            return self.create_room(alias_local, name).await;
+            return self.create_room_with_owner(alias_local, name, owner_localpart).await;
         }
         let status = resp.status();
         Err(CharradissaError::Backend(format!("create_or_join_aliased_room failed: {}", status)))
@@ -365,7 +457,7 @@ mod tests {
             "occitane.guilhem".to_string(),
         );
 
-        let result = client.create_or_join_aliased_room("amassada", "Amassada Room").await;
+        let result = client.create_or_join_aliased_room("amassada", "Amassada Room", None).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().as_str(), "!testroom:occitane.guilhem");
     }
@@ -407,8 +499,83 @@ mod tests {
             "occitane.guilhem".to_string(),
         );
 
-        let result = client.create_or_join_aliased_room("amassada", "Amassada Room").await;
+        let result = client.create_or_join_aliased_room("amassada", "Amassada Room", None).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().as_str(), "!newroom:occitane.guilhem");
+    }
+
+    /// Charradissa #20: a component room must grant the owning agent PL 100 and
+    /// the appservice sender (Guilhem, @charradissa) PL 50 at creation time.
+    #[tokio::test]
+    async fn create_room_with_owner_grants_owner_100_and_sender_50() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::{method, path, body_partial_json};
+
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/_matrix/client/v3/createRoom"))
+            .and(body_partial_json(serde_json::json!({
+                "power_level_content_override": {
+                    "users": {
+                        "@amassada:occitane.guilhem": 100,
+                        "@charradissa:occitane.guilhem": 50
+                    }
+                }
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "room_id": "!amassada:occitane.guilhem" }))
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = AppserviceClient::new(
+            mock_server.uri(),
+            "test_token".to_string(),
+            "@charradissa:occitane.guilhem".to_string(),
+            "occitane.guilhem".to_string(),
+        );
+
+        // If the power-level body doesn't match, no mock matches and this errors.
+        let result = client.create_room_with_owner("amassada", "amassada agent", Some("amassada")).await;
+        assert!(result.is_ok(), "create_room_with_owner should match the PL body: {:?}", result.err());
+        assert_eq!(result.unwrap().as_str(), "!amassada:occitane.guilhem");
+    }
+
+    /// Charradissa #22: a DM room is created with `is_direct: true` and invites
+    /// the partner agent.
+    #[tokio::test]
+    async fn create_dm_room_sets_is_direct_and_invites_partner() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::{method, path, body_partial_json};
+
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/_matrix/client/v3/createRoom"))
+            .and(body_partial_json(serde_json::json!({
+                "is_direct": true,
+                "invite": ["@amassada:occitane.guilhem"]
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "room_id": "!dm:occitane.guilhem" }))
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = AppserviceClient::new(
+            mock_server.uri(),
+            "test_token".to_string(),
+            "@charradissa:occitane.guilhem".to_string(),
+            "occitane.guilhem".to_string(),
+        );
+
+        let result = client.create_dm_room("@amassada:occitane.guilhem").await;
+        assert!(result.is_ok(), "create_dm_room should match is_direct body: {:?}", result.err());
+        assert_eq!(result.unwrap().as_str(), "!dm:occitane.guilhem");
     }
 }

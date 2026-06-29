@@ -192,6 +192,15 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Provision the DM fabric: ensure a direct room exists between Guilhem (the
+    // appservice sender) and each component agent. Runs after identity setup and
+    // room provisioning, when Matrix auth is ready. Idempotent — DMs already
+    // recorded in the sender's m.direct account_data are reused. (Charradissa #22)
+    match backend.provision_dm_rooms(&farga_base_url).await {
+        Ok(dms) => tracing::info!("DM fabric ready: {} rooms", dms.len()),
+        Err(e) => tracing::warn!("DM room provisioning failed: {}", e),
+    }
+
     // Grant kick power (PL 50) to all component agents in every room Charradissa is now
     // in. Running after provisioning ensures newly-created rooms receive the grant in
     // this startup cycle. Idempotent — rooms already at PL ≥ 50 are left untouched.

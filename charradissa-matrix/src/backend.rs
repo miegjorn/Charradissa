@@ -81,7 +81,8 @@ impl MatrixBackend {
         }
 
         // 2. Create-or-join project room (no Responder — Guilhem HTTP handles it).
-        if let Err(e) = self.client.create_or_join_aliased_room(project, &format!("{} project", project)).await {
+        //    No component owner: the sender keeps its default creator power level.
+        if let Err(e) = self.client.create_or_join_aliased_room(project, &format!("{} project", project), None).await {
             tracing::warn!("project room provisioning failed for '{}': {}", project, e);
         } else {
             tracing::info!("project room #{}:… ready", project);
@@ -114,8 +115,13 @@ impl MatrixBackend {
                 continue;
             }
 
-            // Create-or-join component room.
-            match self.client.create_or_join_aliased_room(component, &format!("{} agent", component)).await {
+            // Create-or-join component room. The component agent owns its room
+            // (PL 100) — Charradissa #20. The room alias uses the bare component
+            // name, but the agent's Matrix localpart for "charradissa" is
+            // "charradissa-agent" (see AGENT_LOCAL_PARTS), so normalize for the
+            // power-level grant.
+            let owner_localpart = agent_localpart_for_component(component);
+            match self.client.create_or_join_aliased_room(component, &format!("{} agent", component), Some(owner_localpart)).await {
                 Ok(room_id) => {
                     tracing::info!("component room #{}: {} ready", component, room_id.as_str());
                     let responder = Arc::new(Responder::with_config(
@@ -152,6 +158,101 @@ impl MatrixBackend {
             .send().await;
 
         Ok(map)
+    }
+
+    /// Ensure a DM room exists between Guilhem (the appservice sender,
+    /// `@charradissa`, display name "Guilhem") and each component agent.
+    ///
+    /// Charradissa #22. There is no separate `@guilhem` Matrix user — the
+    /// appservice sender *is* Guilhem on the wire — so the DMs are owned by, and
+    /// the `m.direct` tag is written for, the sender. Idempotent: the existing
+    /// `m.direct` account_data is the source of truth; partners already recorded
+    /// there are reused and never re-created. Returns the partner → room_id map.
+    pub async fn provision_dm_rooms(&self, farga_url: &str) -> Result<HashMap<String, String>> {
+        let bot = self.client.bot_user_id().to_string();
+        let server = self.client.server_name().to_string();
+
+        // 1. Read the sender's current m.direct (user_id -> [room_id, ...]).
+        let mut direct = match self.client.get_account_data(&bot, "m.direct").await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("reading m.direct failed, assuming empty: {}", e);
+                serde_json::json!({})
+            }
+        };
+        if !direct.is_object() {
+            direct = serde_json::json!({});
+        }
+
+        let mut result: HashMap<String, String> = HashMap::new();
+        let mut created_any = false;
+
+        // 2. For each component agent: reuse the recorded DM or create one.
+        //    Scoped so the `&mut` borrow of `direct` ends before we read it back below.
+        {
+            let map_obj = direct.as_object_mut()
+                .expect("direct is an object by construction");
+            for lp in charradissa_core::registration::COMPONENT_AGENT_LOCALPARTS {
+                let partner = format!("@{}:{}", lp, server);
+                if let Some(existing) = map_obj.get(&partner)
+                    .and_then(|v| v.as_array())
+                    .and_then(|rooms| rooms.iter().find_map(|r| r.as_str()))
+                {
+                    result.insert(partner.clone(), existing.to_string());
+                    continue;
+                }
+                match self.client.create_dm_room(&partner).await {
+                    Ok(room_id) => {
+                        tracing::info!("provisioned DM room {} with {}", room_id.as_str(), partner);
+                        map_obj.insert(partner.clone(), serde_json::json!([room_id.as_str()]));
+                        result.insert(partner.clone(), room_id.as_str().to_string());
+                        created_any = true;
+                    }
+                    Err(e) => tracing::warn!("DM room creation failed for {}: {}", partner, e),
+                }
+            }
+        }
+
+        // 3. Persist the updated m.direct for the sender (only if it changed).
+        if created_any {
+            if let Err(e) = self.client.set_account_data(&bot, "m.direct", &direct).await {
+                tracing::warn!("persisting m.direct failed: {}", e);
+            }
+        }
+
+        // 4. Observability signal to Farga (best-effort, ignore errors).
+        let mapping: Vec<String> = result.iter()
+            .map(|(partner, room)| format!("{} → {}", partner, room))
+            .collect();
+        let signal_url = format!("{}/signals", farga_url);
+        let _ = reqwest::Client::new().post(&signal_url)
+            .json(&serde_json::json!({
+                "project": "occitan",
+                "source": "charradissa-dm-provisioning",
+                "signals": [{
+                    "project": "occitan",
+                    "source": "charradissa-dm-provisioning",
+                    "content": format!(
+                        "provisioned {} DM rooms (Guilhem ↔ component agents): {}",
+                        result.len(), mapping.join(", ")
+                    )
+                }]
+            }))
+            .send().await;
+
+        Ok(result)
+    }
+}
+
+/// Map a project component name to the component agent's Matrix localpart.
+///
+/// Identical for every component except `charradissa`, whose agent identity is
+/// `charradissa-agent` (the bare `charradissa` localpart is the appservice
+/// sender). Keeps the PL-100 owner grant aligned with [`AGENT_LOCAL_PARTS`].
+fn agent_localpart_for_component(component: &str) -> &str {
+    match component {
+        "charradissa" => "charradissa-agent",
+        other => other,
     }
 }
 
@@ -411,5 +512,102 @@ mod tests {
         assert_eq!(evs.len(), 2);
         assert_eq!(evs[0].content, "first"); // dir=b returns newest-first; we reverse to oldest-first
         assert_eq!(evs[1].content, "second");
+    }
+
+    #[test]
+    fn charradissa_component_maps_to_agent_localpart() {
+        // The bare `charradissa` localpart is the sender; the agent is `charradissa-agent`.
+        assert_eq!(agent_localpart_for_component("charradissa"), "charradissa-agent");
+        assert_eq!(agent_localpart_for_component("amassada"), "amassada");
+        assert_eq!(agent_localpart_for_component("gardian"), "gardian");
+    }
+
+    /// Path of the sender's m.direct account_data endpoint, used by the DM tests.
+    const M_DIRECT_PATH: &str =
+        "/_matrix/client/v3/user/%40charradissa%3Aoccitane.guilhem/account_data/m.direct";
+
+    /// Charradissa #22: with no recorded DMs, a room is created for each of the
+    /// seven component agents. The `.expect(7)` on the createRoom mock is verified
+    /// when the MockServer is dropped at end of test.
+    #[tokio::test]
+    async fn provision_dm_rooms_creates_for_all_seven_when_absent() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::{method, path};
+
+        let mock = MockServer::start().await;
+
+        // m.direct does not exist yet → 404 (treated as empty).
+        Mock::given(method("GET"))
+            .and(path(M_DIRECT_PATH))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock).await;
+
+        // Exactly seven DM rooms must be created (id value is irrelevant here).
+        Mock::given(method("POST"))
+            .and(path("/_matrix/client/v3/createRoom"))
+            .respond_with(ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "room_id": "!dm:occitane.guilhem" })))
+            .expect(7)
+            .mount(&mock).await;
+
+        // m.direct is persisted afterwards.
+        Mock::given(method("PUT"))
+            .and(path(M_DIRECT_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock).await;
+
+        let backend = backend_for_test(&mock.uri());
+        let result = backend.provision_dm_rooms(&mock.uri()).await.expect("provision should succeed");
+
+        assert_eq!(result.len(), 7, "expected a DM for each of the 7 component agents");
+        // MockServer drop verifies the createRoom `.expect(7)`.
+    }
+
+    /// Charradissa #22 idempotency: calling provision twice when m.direct already
+    /// records all seven DMs creates no new rooms (no duplicates). The `.expect(0)`
+    /// on the createRoom mock fails the test if any DM is (re-)created.
+    #[tokio::test]
+    async fn provision_dm_rooms_is_idempotent() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::{method, path};
+
+        let mock = MockServer::start().await;
+
+        // m.direct already records a DM room for every component agent.
+        let mut direct = serde_json::Map::new();
+        for lp in charradissa_core::registration::COMPONENT_AGENT_LOCALPARTS {
+            direct.insert(
+                format!("@{}:occitane.guilhem", lp),
+                serde_json::json!([format!("!existing-{}:occitane.guilhem", lp)]),
+            );
+        }
+        let direct_body = serde_json::Value::Object(direct);
+
+        Mock::given(method("GET"))
+            .and(path(M_DIRECT_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(direct_body))
+            .mount(&mock).await;
+
+        // No DM room may be created across either call.
+        Mock::given(method("POST"))
+            .and(path("/_matrix/client/v3/createRoom"))
+            .respond_with(ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "room_id": "!should-not-happen:occitane.guilhem" })))
+            .expect(0)
+            .mount(&mock).await;
+
+        let backend = backend_for_test(&mock.uri());
+
+        let first = backend.provision_dm_rooms(&mock.uri()).await.expect("first provision");
+        let second = backend.provision_dm_rooms(&mock.uri()).await.expect("second provision");
+
+        assert_eq!(first.len(), 7);
+        assert_eq!(second.len(), 7);
+        // Existing rooms are reused, not re-created.
+        assert_eq!(
+            second.get("@amassada:occitane.guilhem").map(String::as_str),
+            Some("!existing-amassada:occitane.guilhem")
+        );
+        // MockServer drop verifies the createRoom `.expect(0)`.
     }
 }
