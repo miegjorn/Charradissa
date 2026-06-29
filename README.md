@@ -23,10 +23,11 @@ The chat backend is fully abstracted — Matrix ships first; IRC and others impl
 9. [Configuration Reference](#configuration-reference)
 10. [Environment Variables](#environment-variables)
 11. [Matrix Appservice Setup](#matrix-appservice-setup)
-12. [Infrastructure](#infrastructure)
-13. [Building and Running](#building-and-running)
-14. [Testing](#testing)
-15. [Out of Scope (v1)](#out-of-scope-v1)
+12. [Matrix MCP Tool Server](#matrix-mcp-tool-server)
+13. [Infrastructure](#infrastructure)
+14. [Building and Running](#building-and-running)
+15. [Testing](#testing)
+16. [Out of Scope (v1)](#out-of-scope-v1)
 
 ---
 
@@ -76,11 +77,12 @@ Dependencies: `amassada-core` (path dep), `tokio`, `serde`/`serde_json`, `toml`,
 
 ### `charradissa-matrix`
 
-Matrix-specific implementation of `ChatBackend`. Three modules:
+Matrix-specific implementation of `ChatBackend`. Four modules:
 
 - **`client`** (`AppserviceClient`) — Thin `reqwest` wrapper over the Matrix Client-Server API v3: `send_message`, `create_room`, `invite`, `register_agent`. Uses `Bearer <as_token>` auth.
 - **`backend`** (`MatrixBackend`) — Implements `ChatBackend` by delegating to `AppserviceClient`.
 - **`appservice`** (`AppserviceState`, `handle_transaction`, `parse_matrix_event`) — Axum handler for `PUT /_matrix/app/v1/transactions/:txnId`. Parses Matrix events into `ChatEvent`, detects slash commands by body prefix.
+- **`mcp`** (`MatrixMcp`) — JSON-RPC tool server backing the [Matrix MCP Tool Server](#matrix-mcp-tool-server) (`matrix_send`, `matrix_invite`, `matrix_kick`, `matrix_get_dm`), reusing `AppserviceClient`.
 
 Dependencies: `charradissa-core`, `tokio`, `axum`, `serde_json`, `reqwest`, `chrono`, `uuid`, `async-trait`, `tracing`.
 
@@ -384,6 +386,7 @@ system     = "You are a helpful assistant embedded in Matrix."
 | `GUILHEM_URL` | `http://guilhem.agents.svc.cluster.local:8080` | Base URL of the Guilhem pod's `/matrix/reply` endpoint |
 | `ANTHROPIC_API_KEY` | — | API key for the Anthropic Claude API; required by any agent tier that makes LLM calls directly (concierge convergence sweep, Responder-backed component agents) |
 | `AMASSADA_URL` | `http://amassada:7700` | Base URL of the Amassada service; used as the default origin for project-agent endpoints when no explicit `endpoint` is set in `[[agents.project]]` |
+| `CHARRADISSA_DM_REGISTRY` | `charradissa-dm-registry.json` | Path to the DM room registry JSON read by the `matrix_get_dm` MCP tool (see [Matrix MCP Tool Server](#matrix-mcp-tool-server)). Provisioned by Charradissa#22; a missing file degrades to an empty registry |
 | `RUST_LOG` | — | Log filter (e.g. `charradissa=debug,info`) via `tracing-subscriber` |
 
 ---
@@ -489,6 +492,68 @@ PUT /_matrix/app/v1/transactions/:txnId
 ```
 
 `handle_transaction` in `charradissa-matrix/src/appservice.rs` receives a JSON body with an `events` array, parses each event via `parse_matrix_event()`, and dispatches to the appropriate agent tier.
+
+---
+
+## Matrix MCP Tool Server
+
+> Charradissa#23 — lets agents *act* in Matrix, not only respond to inbound events.
+
+The daemon serves a [Model Context Protocol](https://modelcontextprotocol.io) tool server over
+JSON-RPC 2.0 at:
+
+```
+POST /mcp
+```
+
+This mirrors the stack convention (`dispatcher` at `:9090/mcp`). The full URL in-cluster is
+`http://charradissa:<CHARRADISSA_LISTEN_PORT>/mcp`. The implementation is
+`charradissa-matrix/src/mcp.rs` (`MatrixMcp`); the HTTP transport is `charradissa-daemon/src/mcp_api.rs`.
+
+### Tools
+
+| Tool | Body | Effect |
+|---|---|---|
+| `matrix_send` | `{room_id, content}` | Send a message to any room or DM by room ID |
+| `matrix_invite` | `{room_id, user_id}` | Invite a user to a room |
+| `matrix_kick` | `{room_id, user_id, reason?}` | Kick a user from a room |
+| `matrix_get_dm` | `{agent}` | Resolve the DM room ID for a component agent (`farga` or `@farga:occitane.guilhem`) |
+
+`tools/list`, `initialize`, and `ping` are also handled. Each `tools/call` returns the standard
+MCP `result.content[0].text` envelope; failures (e.g. a Synapse `M_FORBIDDEN` when the caller's
+power level is insufficient) come back as `isError: true` text rather than a transport error, so
+`matrix_invite` / `matrix_kick` **respect the caller's actual power level and fail gracefully**.
+
+### Authentication
+
+The server acts with the appservice's Matrix token, read from `MATRIX_AS_TOKEN` at daemon startup
+(or resolved via Gardian). It shares the same `AppserviceClient` as inbound handling, so MCP
+actions and inbound replies speak as one Matrix identity.
+
+### DM registry (`matrix_get_dm`)
+
+`matrix_get_dm` reads a JSON object mapping each component agent's localpart to its DM room ID with
+`@guilhem`, from the path in `CHARRADISSA_DM_REGISTRY` (default `charradissa-dm-registry.json`):
+
+```json
+{
+  "farga":    "!abc:occitane.guilhem",
+  "amassada": "!def:occitane.guilhem"
+}
+```
+
+**Dependency — Charradissa#22.** This registry is *provisioned and persisted* by Charradissa#22
+(DM room fabric), which was not yet merged when #23 landed. #23 ships the read side plus the agreed
+storage contract (this JSON shape at this path); #22 only has to write the same shape to the same
+location. Until then, a missing file resolves to an empty registry and `matrix_get_dm` reports
+"no DM room registered" rather than failing — see `charradissa-core/src/dm_registry.rs`.
+
+### Wiring into agents
+
+Tool authority is declared in Fondament role files (`definitions/fondament/*.yaml`,
+`tools.always_on`) under MCP server name `charradissa` — e.g. resolved as
+`mcp__charradissa__matrix_send`. Guilhem and the seven component agents carry `matrix_send` +
+`matrix_get_dm`. Registering the server URL in the Guilhem pod's MCP config is Caissa#33.
 
 ---
 

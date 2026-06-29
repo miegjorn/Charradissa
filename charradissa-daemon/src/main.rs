@@ -1,5 +1,6 @@
 mod registry;
 mod queue_api;
+mod mcp_api;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -218,12 +219,28 @@ async fn main() -> anyhow::Result<()> {
         project_routes,
     };
 
+    // Matrix MCP tool server (Charradissa#23): lets agents act in Matrix (send/invite/kick)
+    // and resolve DM rooms. It shares the appservice's Matrix token, so MCP actions speak as
+    // the same identity as inbound handling. The DM registry is read from the path named by
+    // CHARRADISSA_DM_REGISTRY (provisioned by Charradissa#22); a missing file degrades to an
+    // empty registry so matrix_get_dm reports "not provisioned" rather than crashing.
+    let dm_registry = charradissa_core::dm_registry::DmRegistry::from_env()
+        .unwrap_or_else(|e| {
+            tracing::warn!("DM registry load failed ({}); matrix_get_dm will be empty", e);
+            Default::default()
+        });
+    tracing::info!("Matrix MCP: DM registry loaded with {} entries", dm_registry.len());
+    let matrix_mcp = std::sync::Arc::new(
+        charradissa_matrix::mcp::MatrixMcp::new(backend.appservice_client(), dm_registry),
+    );
+
     let app = Router::new()
         .route("/health", axum::routing::get(|| async { "ok" }))
         .route("/_matrix/app/v1/transactions/:txnId",
             put(charradissa_matrix::appservice::handle_transaction))
         .with_state(appservice_state)
-        .merge(queue_api::router(queue_state));
+        .merge(queue_api::router(queue_state))
+        .merge(mcp_api::router(mcp_api::McpState { mcp: matrix_mcp }));
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", appservice_port)).await?;
     tracing::info!("charradissa-daemon webhook listening on :{}", appservice_port);
