@@ -9,6 +9,7 @@
 //! | `matrix_invite` | `{room_id, user_id}`              | Invite a user to a room               |
 //! | `matrix_kick`   | `{room_id, user_id, reason?}`     | Kick a user from a room               |
 //! | `matrix_get_dm` | `{agent}`                         | Resolve the DM room ID for an agent   |
+//! | `matrix_leave`  | `{room_id}`                       | Leave a room                          |
 //!
 //! ## Transport
 //!
@@ -97,6 +98,17 @@ impl MatrixMcp {
                     "required": ["agent"]
                 }
             }),
+            json!({
+                "name": "matrix_leave",
+                "description": "Leave a Matrix room. Use when invited to a room you should not be in, or to clean up after completing a task in a temporary room.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "room_id": {"type": "string", "description": "Room ID to leave, e.g. !abc:occitane.guilhem"}
+                    },
+                    "required": ["room_id"]
+                }
+            }),
         ]
     }
 
@@ -180,6 +192,14 @@ impl MatrixMcp {
                     )),
                 }
             }
+            "matrix_leave" => {
+                let room_id = required_str(args, "room_id")?;
+                self.client
+                    .leave_room(&RoomId::new(room_id))
+                    .await
+                    .map(|_| format!("Left room {room_id}."))
+                    .map_err(|e| e.to_string())
+            }
             other => Err(format!("unknown tool: {other}")),
         }
     }
@@ -232,14 +252,14 @@ mod tests {
     // ---- tools/list & initialize ------------------------------------------------------
 
     #[tokio::test]
-    async fn tools_list_advertises_four_tools() {
+    async fn tools_list_advertises_five_tools() {
         let server = MockServer::start().await;
         let mcp = mcp_for(&server, registry());
         let resp = mcp.handle(json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})).await;
         let tools = resp["result"]["tools"].as_array().expect("tools array");
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-        assert_eq!(names.len(), 4);
-        for expected in ["matrix_send", "matrix_invite", "matrix_kick", "matrix_get_dm"] {
+        assert_eq!(names.len(), 5);
+        for expected in ["matrix_send", "matrix_invite", "matrix_kick", "matrix_get_dm", "matrix_leave"] {
             assert!(names.contains(&expected), "missing tool {expected}");
         }
     }
@@ -409,6 +429,42 @@ mod tests {
         let out = mcp.call_tool("matrix_get_dm", &json!({"agent": "nope"})).await;
         assert!(out.is_err());
         assert!(out.unwrap_err().contains("no DM room"));
+    }
+
+    // ---- matrix_leave ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn matrix_leave_succeeds() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/_matrix/client/v3/rooms/.*/leave$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        let mcp = mcp_for(&server, registry());
+        let out = mcp
+            .call_tool("matrix_leave", &json!({"room_id": "!r:occitane.guilhem"}))
+            .await;
+        assert!(out.is_ok(), "expected ok, got {out:?}");
+        assert!(out.unwrap().contains("Left room"));
+    }
+
+    #[tokio::test]
+    async fn matrix_leave_forbidden_fails_gracefully() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/_matrix/client/v3/rooms/.*/leave$"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({"errcode": "M_FORBIDDEN"})))
+            .mount(&server)
+            .await;
+        let mcp = mcp_for(&server, registry());
+        let resp = mcp
+            .handle(json!({
+                "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                "params": {"name": "matrix_leave", "arguments": {"room_id": "!r:occitane.guilhem"}}
+            }))
+            .await;
+        assert_eq!(resp["result"]["isError"], true);
     }
 
     #[tokio::test]
