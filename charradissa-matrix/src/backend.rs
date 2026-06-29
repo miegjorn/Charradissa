@@ -537,10 +537,10 @@ mod tests {
         "/_matrix/client/v3/user/%40charradissa%3Aoccitane.guilhem/account_data/m.direct";
 
     /// Charradissa #22: with no recorded DMs, a room is created for each of the
-    /// seven component agents. The `.expect(7)` on the createRoom mock is verified
+    /// eight component agents. The `.expect(8)` on the createRoom mock is verified
     /// when the MockServer is dropped at end of test.
     #[tokio::test]
-    async fn provision_dm_rooms_creates_for_all_seven_when_absent() {
+    async fn provision_dm_rooms_creates_for_all_eight_when_absent() {
         use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path};
 
@@ -552,12 +552,12 @@ mod tests {
             .respond_with(ResponseTemplate::new(404))
             .mount(&mock).await;
 
-        // Exactly seven DM rooms must be created (id value is irrelevant here).
+        // Exactly eight DM rooms must be created (id value is irrelevant here).
         Mock::given(method("POST"))
             .and(path("/_matrix/client/v3/createRoom"))
             .respond_with(ResponseTemplate::new(200)
                 .set_body_json(serde_json::json!({ "room_id": "!dm:occitane.guilhem" })))
-            .expect(7)
+            .expect(8)
             .mount(&mock).await;
 
         // m.direct is persisted afterwards.
@@ -569,12 +569,12 @@ mod tests {
         let backend = backend_for_test(&mock.uri());
         let result = backend.provision_dm_rooms(&mock.uri()).await.expect("provision should succeed");
 
-        assert_eq!(result.len(), 7, "expected a DM for each of the 7 component agents");
-        // MockServer drop verifies the createRoom `.expect(7)`.
+        assert_eq!(result.len(), 8, "expected a DM for each of the 8 component agents");
+        // MockServer drop verifies the createRoom `.expect(8)`.
     }
 
     /// Charradissa #22 idempotency: calling provision twice when m.direct already
-    /// records all seven DMs creates no new rooms (no duplicates). The `.expect(0)`
+    /// records all eight DMs creates no new rooms (no duplicates). The `.expect(0)`
     /// on the createRoom mock fails the test if any DM is (re-)created.
     #[tokio::test]
     async fn provision_dm_rooms_is_idempotent() {
@@ -611,8 +611,8 @@ mod tests {
         let first = backend.provision_dm_rooms(&mock.uri()).await.expect("first provision");
         let second = backend.provision_dm_rooms(&mock.uri()).await.expect("second provision");
 
-        assert_eq!(first.len(), 7);
-        assert_eq!(second.len(), 7);
+        assert_eq!(first.len(), 8);
+        assert_eq!(second.len(), 8);
         // Existing rooms are reused, not re-created.
         assert_eq!(
             second.get("@amassada:occitane.guilhem").map(String::as_str),

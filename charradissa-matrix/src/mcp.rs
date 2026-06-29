@@ -29,6 +29,7 @@
 //! as a graceful `isError` tool result rather than a panic.
 
 use crate::client::AppserviceClient;
+use charradissa_core::approval::PersistentApprovalQueue;
 use charradissa_core::dm_registry::DmRegistry;
 use charradissa_core::types::{RoomId, UserId};
 use serde_json::{json, Value};
@@ -41,11 +42,18 @@ pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub struct MatrixMcp {
     client: Arc<AppserviceClient>,
     dm_registry: DmRegistry,
+    approval_queue: Arc<PersistentApprovalQueue>,
+    approval_room_id: String,
 }
 
 impl MatrixMcp {
-    pub fn new(client: Arc<AppserviceClient>, dm_registry: DmRegistry) -> Self {
-        Self { client, dm_registry }
+    pub fn new(
+        client: Arc<AppserviceClient>,
+        dm_registry: DmRegistry,
+        approval_queue: Arc<PersistentApprovalQueue>,
+        approval_room_id: String,
+    ) -> Self {
+        Self { client, dm_registry, approval_queue, approval_room_id }
     }
 
     /// The tool definitions advertised by `tools/list`.
@@ -120,6 +128,21 @@ impl MatrixMcp {
                         "limit": {"type": "integer", "description": "Number of messages to fetch (1–20, default 20)"}
                     },
                     "required": ["room_id"]
+                }
+            }),
+            json!({
+                "name": "matrix_request_approval",
+                "description": "Post a pending action to the shared approval room and register it in the approval queue. Call this when you need human sign-off before continuing (e.g. a PR you opened needs review, or a destructive action needs approval). Returns an approval_id. STOP working after calling this — you will receive a Matrix message in your room when approved or rejected.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "component": {"type": "string", "description": "Your component name, e.g. amassada"},
+                        "category": {"type": "string", "description": "code | db | infra"},
+                        "description": {"type": "string", "description": "What needs approval — include PR URL or issue number"},
+                        "params": {"type": "object", "description": "Optional structured context (pr_url, issue_number, etc.)"},
+                        "source_room_id": {"type": "string", "description": "The Matrix room ID of the requesting agent's room. Used to send approval/rejection notifications back to the agent."}
+                    },
+                    "required": ["component", "category", "description"]
                 }
             }),
         ]
@@ -248,6 +271,40 @@ impl MatrixMcp {
                     })
                     .map_err(|e| e.to_string())
             }
+            "matrix_request_approval" => {
+                let component = required_str(args, "component")?;
+                let category = args.get("category").and_then(|v| v.as_str()).unwrap_or("code");
+                let description = required_str(args, "description")?;
+                // Merge component into params so appservice can surface it in notifications.
+                let mut merged: serde_json::Map<String, Value> = args
+                    .get("params")
+                    .and_then(|v| v.as_object())
+                    .cloned()
+                    .unwrap_or_default();
+                merged.insert("component".to_string(), Value::String(component.to_string()));
+                let params = Value::Object(merged);
+
+                let bot_uid = self.client.bot_user_id().to_string();
+                let source_room_id = args
+                    .get("source_room_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(&bot_uid);
+
+                let id = self.approval_queue
+                    .register(source_room_id, category, description, params)
+                    .map_err(|e| e.to_string())?;
+
+                let msg = format!(
+                    "⏳ **[{component}/{category}]** {description}\n   ID: `{id}`\n   Reply: `/approve {id}` or `/reject {id} <reason>`"
+                );
+                self.client
+                    .send_message(&RoomId::new(&self.approval_room_id), &msg)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                Ok(format!("approval_id: {id} — posted to approval room. Stop working and wait for approval notification in your Matrix room."))
+            }
             other => Err(format!("unknown tool: {other}")),
         }
     }
@@ -294,20 +351,23 @@ mod tests {
             "@charradissa:occitane.guilhem".to_string(),
             "occitane.guilhem".to_string(),
         ));
-        MatrixMcp::new(client, reg)
+        let approval_queue = Arc::new(charradissa_core::approval::PersistentApprovalQueue::new(
+            std::path::PathBuf::from("/tmp/test-charradissa-approval-queue.json"),
+        ));
+        MatrixMcp::new(client, reg, approval_queue, String::new())
     }
 
     // ---- tools/list & initialize ------------------------------------------------------
 
     #[tokio::test]
-    async fn tools_list_advertises_six_tools() {
+    async fn tools_list_advertises_seven_tools() {
         let server = MockServer::start().await;
         let mcp = mcp_for(&server, registry());
         let resp = mcp.handle(json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})).await;
         let tools = resp["result"]["tools"].as_array().expect("tools array");
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-        assert_eq!(names.len(), 6);
-        for expected in ["matrix_send", "matrix_invite", "matrix_kick", "matrix_get_dm", "matrix_leave", "matrix_read"] {
+        assert_eq!(names.len(), 7);
+        for expected in ["matrix_send", "matrix_invite", "matrix_kick", "matrix_get_dm", "matrix_leave", "matrix_read", "matrix_request_approval"] {
             assert!(names.contains(&expected), "missing tool {expected}");
         }
     }
@@ -473,6 +533,14 @@ mod tests {
     #[tokio::test]
     async fn matrix_get_dm_unknown_agent_is_error() {
         let server = MockServer::start().await;
+        // Mock joined_rooms returning empty list so the scan returns Ok(None),
+        // which hits the "no DM room found" branch (not the "scan failed" branch).
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/_matrix/client/v3/joined_rooms$"))
+            .respond_with(ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"joined_rooms": []})))
+            .mount(&server)
+            .await;
         let mcp = mcp_for(&server, registry());
         let out = mcp.call_tool("matrix_get_dm", &json!({"agent": "nope"})).await;
         assert!(out.is_err());

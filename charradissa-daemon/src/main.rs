@@ -217,6 +217,7 @@ async fn main() -> anyhow::Result<()> {
         self_user_id: bot_user_id.clone(),
         component_agents,
         project_routes,
+        approval_queue: Arc::clone(&persistent_queue),
     };
 
     // Matrix MCP tool server (Charradissa#23): lets agents act in Matrix (send/invite/kick)
@@ -230,8 +231,19 @@ async fn main() -> anyhow::Result<()> {
             Default::default()
         });
     tracing::info!("Matrix MCP: DM registry loaded with {} entries", dm_registry.len());
+
+    let approval_room_id = std::env::var("APPROVAL_ROOM_ID").unwrap_or_else(|_| {
+        tracing::warn!("APPROVAL_ROOM_ID not set — matrix_request_approval will fail to post notifications");
+        String::new()
+    });
+
     let matrix_mcp = std::sync::Arc::new(
-        charradissa_matrix::mcp::MatrixMcp::new(backend.appservice_client(), dm_registry),
+        charradissa_matrix::mcp::MatrixMcp::new(
+            backend.appservice_client(),
+            dm_registry,
+            Arc::clone(&persistent_queue),
+            approval_room_id,
+        ),
     );
 
     let app = Router::new()

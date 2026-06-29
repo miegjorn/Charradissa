@@ -1,4 +1,5 @@
 use axum::{extract::{Path, Query, State}, http::{HeaderMap, StatusCode}, Json};
+use charradissa_core::approval::PersistentApprovalQueue;
 use charradissa_core::backend::ChatBackend;
 use charradissa_core::blocks::strip_block_markers;
 use charradissa_core::config::ProjectAgentConfig;
@@ -26,6 +27,8 @@ pub struct AppserviceState {
     /// Project agent configs keyed by Matrix room ID. Messages in these rooms are
     /// forwarded to Amassada with `project_id` injected into the turn body.
     pub project_routes: HashMap<String, ProjectAgentConfig>,
+    /// Persistent approval queue for /approve and /reject slash command handling.
+    pub approval_queue: Arc<PersistentApprovalQueue>,
 }
 
 pub fn token_ok(provided: Option<&str>, expected: &str) -> bool {
@@ -84,6 +87,72 @@ pub async fn handle_transaction(
             // (e.g. @farga, @gardian) — they are our own echoes.
             if is_appservice_sender(ev.sender.as_str(), &state.self_user_id) {
                 continue;
+            }
+
+            // Approval command handling — /approve <id> and /reject <id> [reason].
+            // Fires before agent routing, on any room, so operators can approve from anywhere.
+            match &ev.kind {
+                ChatEventKind::SlashCommand { command, args } if command == "approve" => {
+                    let id = args.trim().to_string();
+                    if !id.is_empty() {
+                        let records = state.approval_queue.list_all();
+                        let record = records.into_iter().find(|r| r.id == id);
+                        match state.approval_queue.approve(&id) {
+                            Ok(()) => {
+                                if let Some(rec) = record {
+                                    let notify_room = rec.room_id.clone();
+                                    let component = rec.params
+                                        .get("component")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or(&rec.category)
+                                        .to_string();
+                                    let description = rec.description.clone();
+                                    let aid = rec.id.clone();
+                                    let backend = state.backend.clone();
+                                    tokio::spawn(async move {
+                                        let msg = format!(
+                                            "✅ Approval `{aid}` granted for **[{component}]** {description}. Continue processing next item."
+                                        );
+                                        if let Err(e) = backend.send_message(&RoomId::new(&notify_room), &msg).await {
+                                            tracing::error!("approval notify send failed: {}", e);
+                                        }
+                                    });
+                                }
+                            }
+                            Err(e) => tracing::warn!("approve {} failed: {}", id, e),
+                        }
+                    }
+                    continue;
+                }
+                ChatEventKind::SlashCommand { command, args } if command == "reject" => {
+                    let mut parts = args.splitn(2, ' ');
+                    let id = parts.next().unwrap_or("").trim().to_string();
+                    let reason = parts.next().unwrap_or("rejected by operator").trim().to_string();
+                    if !id.is_empty() {
+                        let records = state.approval_queue.list_all();
+                        let record = records.into_iter().find(|r| r.id == id);
+                        match state.approval_queue.reject(&id, reason.clone()) {
+                            Ok(()) => {
+                                if let Some(rec) = record {
+                                    let notify_room = rec.room_id.clone();
+                                    let aid = rec.id.clone();
+                                    let backend = state.backend.clone();
+                                    tokio::spawn(async move {
+                                        let msg = format!(
+                                            "❌ Approval `{aid}` rejected. Reason: {reason}. Skip this item and continue."
+                                        );
+                                        if let Err(e) = backend.send_message(&RoomId::new(&notify_room), &msg).await {
+                                            tracing::error!("rejection notify send failed: {}", e);
+                                        }
+                                    });
+                                }
+                            }
+                            Err(e) => tracing::warn!("reject {} failed: {}", id, e),
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
             }
 
             if let Some(project_cfg) = state.project_routes.get(ev.room_id.as_str()).cloned() {
