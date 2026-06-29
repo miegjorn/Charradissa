@@ -330,6 +330,28 @@ impl AppserviceClient {
         resp.json().await.map_err(|e| CharradissaError::Backend(e.to_string()))
     }
 
+    /// Fetch up to `limit` recent messages from a room, returned in chronological order
+    /// as `(sender_mxid, body)` pairs. Only `m.room.message` events with a text body
+    /// are included; state events and redacted messages are silently skipped.
+    pub async fn get_messages(&self, room: &RoomId, limit: u32) -> Result<Vec<(String, String)>> {
+        let raw = self.room_messages(room, limit).await?;
+        let mut msgs: Vec<(String, String)> = raw["chunk"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e["type"].as_str() == Some("m.room.message"))
+            .filter_map(|e| {
+                let sender = e["sender"].as_str()?.to_string();
+                let body = e["content"]["body"].as_str()?.to_string();
+                Some((sender, body))
+            })
+            .collect();
+        // dir=b returns newest-first; reverse to chronological order.
+        msgs.reverse();
+        Ok(msgs)
+    }
+
     pub fn bot_user_id(&self) -> &str {
         &self.bot_user_id
     }

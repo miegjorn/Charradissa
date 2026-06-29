@@ -10,6 +10,7 @@
 //! | `matrix_kick`   | `{room_id, user_id, reason?}`     | Kick a user from a room               |
 //! | `matrix_get_dm` | `{agent}`                         | Resolve the DM room ID for an agent   |
 //! | `matrix_leave`  | `{room_id}`                       | Leave a room                          |
+//! | `matrix_read`   | `{room_id, limit?}`               | Read recent messages from a room      |
 //!
 //! ## Transport
 //!
@@ -109,6 +110,18 @@ impl MatrixMcp {
                     "required": ["room_id"]
                 }
             }),
+            json!({
+                "name": "matrix_read",
+                "description": "Read recent messages from a Matrix room (newest up to `limit`, default 20, max 20). Returns messages in chronological order as 'sender: body' lines. Use to catch up on context after joining or re-joining a room.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "room_id": {"type": "string", "description": "Room ID to read from, e.g. !abc:occitane.guilhem"},
+                        "limit": {"type": "integer", "description": "Number of messages to fetch (1–20, default 20)"}
+                    },
+                    "required": ["room_id"]
+                }
+            }),
         ]
     }
 
@@ -200,6 +213,27 @@ impl MatrixMcp {
                     .map(|_| format!("Left room {room_id}."))
                     .map_err(|e| e.to_string())
             }
+            "matrix_read" => {
+                let room_id = required_str(args, "room_id")?;
+                let limit = args.get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(20)
+                    .clamp(1, 20) as u32;
+                self.client
+                    .get_messages(&RoomId::new(room_id), limit)
+                    .await
+                    .map(|msgs| {
+                        if msgs.is_empty() {
+                            "No messages found.".to_string()
+                        } else {
+                            msgs.iter()
+                                .map(|(sender, body)| format!("{sender}: {body}"))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        }
+                    })
+                    .map_err(|e| e.to_string())
+            }
             other => Err(format!("unknown tool: {other}")),
         }
     }
@@ -252,14 +286,14 @@ mod tests {
     // ---- tools/list & initialize ------------------------------------------------------
 
     #[tokio::test]
-    async fn tools_list_advertises_five_tools() {
+    async fn tools_list_advertises_six_tools() {
         let server = MockServer::start().await;
         let mcp = mcp_for(&server, registry());
         let resp = mcp.handle(json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})).await;
         let tools = resp["result"]["tools"].as_array().expect("tools array");
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-        assert_eq!(names.len(), 5);
-        for expected in ["matrix_send", "matrix_invite", "matrix_kick", "matrix_get_dm", "matrix_leave"] {
+        assert_eq!(names.len(), 6);
+        for expected in ["matrix_send", "matrix_invite", "matrix_kick", "matrix_get_dm", "matrix_leave", "matrix_read"] {
             assert!(names.contains(&expected), "missing tool {expected}");
         }
     }
@@ -465,6 +499,46 @@ mod tests {
             }))
             .await;
         assert_eq!(resp["result"]["isError"], true);
+    }
+
+    // ---- matrix_read ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn matrix_read_returns_chronological_messages() {
+        let server = MockServer::start().await;
+        // dir=b returns newest-first; the tool must reverse to chronological.
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/_matrix/client/v3/rooms/.*/messages$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "chunk": [
+                    {"type":"m.room.message","sender":"@b:s","content":{"body":"second","msgtype":"m.text"}},
+                    {"type":"m.room.message","sender":"@a:s","content":{"body":"first","msgtype":"m.text"}}
+                ],
+                "start": "t1", "end": "t2"
+            })))
+            .mount(&server)
+            .await;
+        let mcp = mcp_for(&server, registry());
+        let out = mcp.call_tool("matrix_read", &json!({"room_id": "!r:occitane.guilhem"})).await;
+        assert!(out.is_ok(), "expected ok, got {out:?}");
+        let text = out.unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("@a:s") && lines[0].contains("first"), "got: {}", lines[0]);
+        assert!(lines[1].contains("@b:s") && lines[1].contains("second"), "got: {}", lines[1]);
+    }
+
+    #[tokio::test]
+    async fn matrix_read_empty_room_returns_no_messages_string() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/_matrix/client/v3/rooms/.*/messages$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunk":[],"start":"t1","end":"t2"})))
+            .mount(&server)
+            .await;
+        let mcp = mcp_for(&server, registry());
+        let out = mcp.call_tool("matrix_read", &json!({"room_id": "!r:occitane.guilhem"})).await;
+        assert_eq!(out.unwrap(), "No messages found.");
     }
 
     #[tokio::test]
