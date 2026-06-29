@@ -227,7 +227,11 @@ impl MatrixMcp {
                             "No messages found.".to_string()
                         } else {
                             msgs.iter()
-                                .map(|(sender, body)| format!("{sender}: {body}"))
+                                .map(|(sender, body)| {
+                                    // Strip server suffix: @user:server → @user
+                                    let short = sender.split(':').next().unwrap_or(sender);
+                                    format!("{short}: {body}")
+                                })
                                 .collect::<Vec<_>>()
                                 .join("\n")
                         }
@@ -524,8 +528,8 @@ mod tests {
         let text = out.unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("@a:s") && lines[0].contains("first"), "got: {}", lines[0]);
-        assert!(lines[1].contains("@b:s") && lines[1].contains("second"), "got: {}", lines[1]);
+        assert!(lines[0].contains("@a") && lines[0].contains("first"), "got: {}", lines[0]);
+        assert!(lines[1].contains("@b") && lines[1].contains("second"), "got: {}", lines[1]);
     }
 
     #[tokio::test]
