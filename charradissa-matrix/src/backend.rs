@@ -330,6 +330,14 @@ impl ChatBackend for MatrixBackend {
     async fn set_typing(&self, room: &RoomId, user_id: &str, typing: bool, timeout_ms: u32) -> Result<()> {
         self.client.set_typing(room, user_id, typing, timeout_ms).await
     }
+
+    async fn upload_media(&self, content_type: &str, data: Vec<u8>) -> Result<String> {
+        self.client.upload_media(content_type, data).await
+    }
+
+    async fn send_image(&self, room: &RoomId, mxc_uri: &str, filename: &str) -> Result<()> {
+        self.client.send_image(room, mxc_uri, filename).await
+    }
 }
 
 /// Number of recent messages fed to guilhem as conversational context each turn.

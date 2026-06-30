@@ -32,4 +32,18 @@ pub trait ChatBackend: Send + Sync {
         let _ = (room, user_id, typing, timeout_ms);
         Ok(())
     }
+
+    /// Upload raw bytes to the Matrix media server. Returns the `mxc://` URI.
+    /// Default is a no-op that returns an error — only Matrix backends implement this.
+    async fn upload_media(&self, content_type: &str, data: Vec<u8>) -> Result<String> {
+        let _ = (content_type, data);
+        Err(crate::error::CharradissaError::Backend("upload_media not supported by this backend".into()))
+    }
+
+    /// Send an image message (`m.image`) to a room via an `mxc://` URI.
+    /// Default is a no-op — only Matrix backends implement this.
+    async fn send_image(&self, room: &RoomId, mxc_uri: &str, filename: &str) -> Result<()> {
+        let _ = (room, mxc_uri, filename);
+        Err(crate::error::CharradissaError::Backend("send_image not supported by this backend".into()))
+    }
 }

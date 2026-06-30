@@ -483,6 +483,46 @@ impl AppserviceClient {
         }
         Ok(())
     }
+
+    /// Upload binary content (e.g. a PNG image) to the Matrix media server.
+    /// Returns the `mxc://` URI for use in subsequent `m.image` events.
+    pub async fn upload_media(&self, content_type: &str, data: Vec<u8>) -> Result<String> {
+        let url = format!("{}/_matrix/media/v3/upload", self.homeserver);
+        let resp = self.client.post(&url)
+            .header("Authorization", self.auth_header())
+            .header("Content-Type", content_type)
+            .body(data)
+            .send().await
+            .map_err(|e| CharradissaError::Backend(format!("upload_media request: {}", e)))?;
+        let json: serde_json::Value = resp.json().await
+            .map_err(|e| CharradissaError::Backend(format!("upload_media parse: {}", e)))?;
+        let mxc = json["content_uri"].as_str()
+            .ok_or_else(|| CharradissaError::Backend("no content_uri in upload response".into()))?;
+        Ok(mxc.to_string())
+    }
+
+    /// Send an `m.image` event to a room referencing an already-uploaded `mxc://` URI.
+    pub async fn send_image(&self, room_id: &RoomId, mxc_uri: &str, filename: &str) -> Result<()> {
+        let txn = uuid::Uuid::new_v4();
+        let url = format!(
+            "{}/_matrix/client/v3/rooms/{}/send/m.room.message/{}",
+            self.homeserver, pct(room_id.as_str()), txn
+        );
+        let body = serde_json::json!({
+            "msgtype": "m.image",
+            "body": filename,
+            "url": mxc_uri,
+        });
+        let resp = self.client.put(&url)
+            .header("Authorization", self.auth_header())
+            .json(&body)
+            .send().await
+            .map_err(|e| CharradissaError::Backend(format!("send_image: {}", e)))?;
+        if !resp.status().is_success() {
+            return Err(CharradissaError::Backend(format!("send_image failed: {}", resp.status())));
+        }
+        Ok(())
+    }
 }
 
 pub fn user_id(local_part: &str, server_name: &str) -> UserId {

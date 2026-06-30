@@ -209,6 +209,11 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("kick power provisioning failed: {}", e);
     }
 
+    let kroki_url = std::env::var("KROKI_URL").ok();
+    if let Some(ref url) = kroki_url {
+        tracing::info!("Mermaid rendering enabled via Kroki at {}", url);
+    }
+
     let appservice_state = AppserviceState {
         hs_token,
         default_agent_url,
@@ -218,6 +223,7 @@ async fn main() -> anyhow::Result<()> {
         component_agents,
         project_routes,
         approval_queue: Arc::clone(&persistent_queue),
+        kroki_url,
     };
 
     // Matrix MCP tool server (Charradissa#23): lets agents act in Matrix (send/invite/kick)

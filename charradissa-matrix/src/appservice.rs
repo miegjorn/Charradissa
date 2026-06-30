@@ -29,6 +29,9 @@ pub struct AppserviceState {
     pub project_routes: HashMap<String, ProjectAgentConfig>,
     /// Persistent approval queue for /approve and /reject slash command handling.
     pub approval_queue: Arc<PersistentApprovalQueue>,
+    /// Kroki server URL for server-side diagram rendering. When `None`, Mermaid
+    /// blocks are not rendered (they still reach the agent as plain text).
+    pub kroki_url: Option<String>,
 }
 
 pub fn token_ok(provided: Option<&str>, expected: &str) -> bool {
@@ -87,6 +90,40 @@ pub async fn handle_transaction(
             // (e.g. @farga, @gardian) — they are our own echoes.
             if is_appservice_sender(ev.sender.as_str(), &state.self_user_id) {
                 continue;
+            }
+
+            // Mermaid render hook: detect ```mermaid blocks and post rendered PNG.
+            // Fire-and-forget — does not block agent routing.
+            if let Some(kroki_url) = &state.kroki_url {
+                let blocks = charradissa_core::mermaid::extract_mermaid_blocks(&ev.content);
+                if !blocks.is_empty() {
+                    let backend = state.backend.clone();
+                    let room = ev.room_id.clone();
+                    let kroki = kroki_url.clone();
+                    let blocks = blocks.clone();
+                    tokio::spawn(async move {
+                        for (i, diagram) in blocks.iter().enumerate() {
+                            match charradissa_core::mermaid::render_png(&kroki, diagram).await {
+                                Ok(png) => {
+                                    match backend.upload_media("image/png", png).await {
+                                        Ok(mxc) => {
+                                            let name = if blocks.len() == 1 {
+                                                "diagram.png".to_string()
+                                            } else {
+                                                format!("diagram-{}.png", i + 1)
+                                            };
+                                            if let Err(e) = backend.send_image(&room, &mxc, &name).await {
+                                                tracing::warn!("mermaid send_image: {}", e);
+                                            }
+                                        }
+                                        Err(e) => tracing::warn!("mermaid upload failed: {}", e),
+                                    }
+                                }
+                                Err(e) => tracing::warn!("mermaid render failed: {}", e),
+                            }
+                        }
+                    });
+                }
             }
 
             // Approval command handling — /approve <id> and /reject <id> [reason].

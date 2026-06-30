@@ -15,3 +15,4 @@ pub mod agents;
 pub mod transport;
 pub mod farcaster;
 pub mod responder;
+pub mod mermaid;
