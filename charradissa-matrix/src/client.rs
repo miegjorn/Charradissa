@@ -502,14 +502,17 @@ impl AppserviceClient {
     }
 
     /// Send an `m.image` event to a room referencing an already-uploaded `mxc://` URI.
-    /// `filename` is used as the body and to infer the mimetype for the `info` block
-    /// (SVG files get `image/svg+xml`; everything else defaults to `image/png`).
-    pub async fn send_image(&self, room_id: &RoomId, mxc_uri: &str, filename: &str) -> Result<()> {
+    /// `sender_localpart` selects which virtual user posts (appends `?user_id=`); `None` uses the bot.
+    /// `filename` infers the mimetype for the `info` block (SVG → `image/svg+xml`, else `image/png`).
+    pub async fn send_image(&self, room_id: &RoomId, mxc_uri: &str, filename: &str, sender_localpart: Option<&str>) -> Result<()> {
         let txn = uuid::Uuid::new_v4();
-        let url = format!(
+        let mut url = format!(
             "{}/_matrix/client/v3/rooms/{}/send/m.room.message/{}",
             self.homeserver, pct(room_id.as_str()), txn
         );
+        if let Some(lp) = sender_localpart {
+            url.push_str(&format!("?user_id={}", pct(&format!("@{}:{}", lp, self.server_name))));
+        }
         let mimetype = if filename.ends_with(".svg") { "image/svg+xml" } else { "image/png" };
         let body = serde_json::json!({
             "msgtype": "m.image",

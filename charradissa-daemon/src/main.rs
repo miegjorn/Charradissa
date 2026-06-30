@@ -148,8 +148,8 @@ async fn main() -> anyhow::Result<()> {
         match backend.provision_project_rooms(project, &provisioning_params).await {
             Ok(rooms) => {
                 tracing::info!("provisioned {} rooms for project '{}'", rooms.len(), project);
-                for (room_id, responder) in rooms {
-                    component_agents.insert(room_id.as_str().to_string(), responder);
+                for (room_id, (localpart, responder)) in rooms {
+                    component_agents.insert(room_id.as_str().to_string(), (localpart, responder));
                 }
             }
             Err(e) => {
@@ -179,7 +179,7 @@ async fn main() -> anyhow::Result<()> {
                 false, // component agents do not get org-level tools
             ));
             tracing::info!("registered component agent '{}' for room {} (config fallback)", ca.name, ca.room_id);
-            component_agents.insert(ca.room_id.clone(), responder);
+            component_agents.insert(ca.room_id.clone(), (ca.name.clone(), responder));
         }
     }
 

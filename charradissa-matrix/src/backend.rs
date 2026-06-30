@@ -58,11 +58,13 @@ impl MatrixBackend {
 
     /// Discover project components from Farga, resolve system prompts from Fondament,
     /// create-or-join aliased rooms, and return a room_id → Responder map.
+    /// Returns a map of room_id → (agent_localpart, Responder) so callers can send
+    /// responses as the room's virtual user rather than the appservice bot.
     pub async fn provision_project_rooms(
         &self,
         project: &str,
         params: &RoomProvisioningParams,
-    ) -> Result<HashMap<RoomId, Arc<Responder>>> {
+    ) -> Result<HashMap<RoomId, (String, Arc<Responder>)>> {
         let http = reqwest::Client::new();
 
         // 1. Fetch component list from Farga.
@@ -95,7 +97,7 @@ impl MatrixBackend {
         }
 
         // 3. For each component: resolve system prompt + create-or-join component room.
-        let mut map = HashMap::new();
+        let mut map: HashMap<RoomId, (String, Arc<Responder>)> = HashMap::new();
         let server_name = self.client.server_name().to_string();
 
         for component in &components {
@@ -140,7 +142,7 @@ impl MatrixBackend {
                         system_prompt,
                         false,
                     ));
-                    map.insert(room_id, responder);
+                    map.insert(room_id, (owner_localpart.to_string(), responder));
                 }
                 Err(e) => {
                     tracing::warn!("component room provisioning failed for '{}': {}", component, e);
@@ -335,8 +337,8 @@ impl ChatBackend for MatrixBackend {
         self.client.upload_media(content_type, data).await
     }
 
-    async fn send_image(&self, room: &RoomId, mxc_uri: &str, filename: &str) -> Result<()> {
-        self.client.send_image(room, mxc_uri, filename).await
+    async fn send_image(&self, room: &RoomId, mxc_uri: &str, filename: &str, sender_localpart: Option<&str>) -> Result<()> {
+        self.client.send_image(room, mxc_uri, filename, sender_localpart).await
     }
 }
 

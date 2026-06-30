@@ -20,10 +20,10 @@ pub struct AppserviceState {
     pub agent_routes: HashMap<String, String>,
     pub backend: Arc<dyn ChatBackend>,
     pub self_user_id: String,
-    /// Component agents keyed by Matrix room ID. When a message arrives in one of
-    /// these rooms, the corresponding Responder handles it inline (in-process)
-    /// rather than going through the agent_routes/default_agent_url HTTP path.
-    pub component_agents: HashMap<String, Arc<Responder>>,
+    /// Component agents keyed by Matrix room ID. Each entry carries the agent's
+    /// Matrix localpart (e.g. "nervi") so responses are sent as that virtual user
+    /// rather than as the appservice bot.
+    pub component_agents: HashMap<String, (String, Arc<Responder>)>,
     /// Project agent configs keyed by Matrix room ID. Messages in these rooms are
     /// forwarded to Amassada with `project_id` injected into the turn body.
     pub project_routes: HashMap<String, ProjectAgentConfig>,
@@ -93,7 +93,8 @@ pub async fn handle_transaction(
             }
 
             // Diagram render hook: detect ```mermaid blocks and post rendered SVG.
-            // Fire-and-forget — does not block agent routing.
+            // Posts as the room's virtual user (component agent) if one owns the room,
+            // otherwise as the appservice bot. Fire-and-forget — does not block routing.
             if let Some(kroki_url) = &state.kroki_url {
                 let blocks = charradissa_core::mermaid::extract_mermaid_blocks(&ev.content);
                 if !blocks.is_empty() {
@@ -101,6 +102,8 @@ pub async fn handle_transaction(
                     let room = ev.room_id.clone();
                     let kroki = kroki_url.clone();
                     let blocks = blocks.clone();
+                    let sender_lp = state.component_agents.get(ev.room_id.as_str())
+                        .map(|(lp, _)| lp.clone());
                     tokio::spawn(async move {
                         for (i, diagram) in blocks.iter().enumerate() {
                             match charradissa_core::mermaid::render_svg(&kroki, diagram).await {
@@ -112,7 +115,7 @@ pub async fn handle_transaction(
                                             } else {
                                                 format!("diagram-{}.svg", i + 1)
                                             };
-                                            if let Err(e) = backend.send_image(&room, &mxc, &name).await {
+                                            if let Err(e) = backend.send_image(&room, &mxc, &name, sender_lp.as_deref()).await {
                                                 tracing::warn!("diagram send_image: {}", e);
                                             }
                                         }
@@ -230,18 +233,14 @@ pub async fn handle_transaction(
                 continue;
             }
 
-            if let Some(component_responder) = state.component_agents.get(ev.room_id.as_str()).cloned() {
+            if let Some((agent_lp, component_responder)) = state.component_agents.get(ev.room_id.as_str()).cloned() {
                 let backend = state.backend.clone();
                 tokio::spawn(async move {
                     let history = backend.room_history(&ev.room_id, Utc::now()).await.unwrap_or_default();
-                    // Typing indicators are not sent on the component-agent path. Component
-                    // agents run in-process via the Responder and typically reply quickly;
-                    // adding a typing indicator here would require pairing it with a clear
-                    // call, which is unnecessary overhead for synchronous in-process dispatch.
                     match component_responder.reply(&history, &ev).await {
                         Ok(text) if !text.trim().is_empty() => {
                             let text = strip_block_markers(&text);
-                            if let Err(e) = backend.send_message(&ev.room_id, &text).await {
+                            if let Err(e) = backend.send_message_as(&ev.room_id, &text, Some(&agent_lp)).await {
                                 tracing::error!("component agent send failed: {}", e);
                             }
                         }
@@ -249,9 +248,10 @@ pub async fn handle_transaction(
                         Err(e) => {
                             tracing::error!("component agent reply failed: {}", e);
                             if let Err(send_err) = backend
-                                .send_message(
+                                .send_message_as(
                                     &ev.room_id,
                                     "\u{26A0} This component agent is unreachable right now — please try again in a moment.",
+                                    Some(&agent_lp),
                                 )
                                 .await
                             {

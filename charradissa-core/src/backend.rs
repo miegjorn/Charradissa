@@ -41,9 +41,9 @@ pub trait ChatBackend: Send + Sync {
     }
 
     /// Send an image message (`m.image`) to a room via an `mxc://` URI.
-    /// Default is a no-op — only Matrix backends implement this.
-    async fn send_image(&self, room: &RoomId, mxc_uri: &str, filename: &str) -> Result<()> {
-        let _ = (room, mxc_uri, filename);
+    /// `sender_localpart` selects which virtual user posts the event; `None` uses the appservice bot.
+    async fn send_image(&self, room: &RoomId, mxc_uri: &str, filename: &str, sender_localpart: Option<&str>) -> Result<()> {
+        let _ = (room, mxc_uri, filename, sender_localpart);
         Err(crate::error::CharradissaError::Backend("send_image not supported by this backend".into()))
     }
 }
