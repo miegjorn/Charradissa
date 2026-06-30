@@ -6,7 +6,7 @@ use charradissa_core::types::{RoomId, UserId};
 /// Kept here as the canonical source — matches charradissa-registration.yaml namespaces.
 /// Charradissa sets these users to PL 50 (kick power) in every room it creates or joins.
 pub const AGENT_LOCAL_PARTS: &[&str] = &[
-    "gardian", "fondament", "farga", "amassada", "cor", "caissa", "charradissa-agent", "nervi",
+    "guilhem", "gardian", "fondament", "farga", "amassada", "cor", "caissa", "charradissa", "nervi",
 ];
 
 pub struct AppserviceClient {
@@ -72,13 +72,11 @@ impl AppserviceClient {
 
     /// Create an aliased room with power levels preset at creation time.
     ///
-    /// All component agents get PL 50 (kick power) in every room (story #19).
+    /// All component agents get PL 50 (kick power) in every room.
     /// When `owner_localpart` is `Some`, the room is a component room and that
-    /// agent is its owner — granted PL 100 — while the appservice sender
-    /// (Guilhem, `@charradissa`) is set to PL 50 (moderator). This is Charradissa
-    /// #20: future component rooms are correctly configured at creation, not
-    /// retroactively. When `owner_localpart` is `None` (project rooms, etc.) the
-    /// sender keeps its default creator power level (PL 100).
+    /// agent is its owner — granted PL 100 — while the AS sender (@charradissa,
+    /// the substrate bot) is set to PL 50 (moderator). When `owner_localpart`
+    /// is `None` (project rooms, etc.) the sender keeps its default PL 100.
     pub async fn create_room_with_owner(
         &self,
         alias: &str,
@@ -733,7 +731,7 @@ mod tests {
     }
 
     /// Charradissa #20: a component room must grant the owning agent PL 100 and
-    /// the appservice sender (Guilhem, @charradissa) PL 50 at creation time.
+    /// the AS sender (@charradissa, the substrate bot) PL 50 at creation time.
     #[tokio::test]
     async fn create_room_with_owner_grants_owner_100_and_sender_50() {
         use wiremock::{Mock, MockServer, ResponseTemplate};

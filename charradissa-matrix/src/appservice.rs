@@ -267,8 +267,8 @@ pub async fn handle_transaction(
                 .get(ev.room_id.as_str())
                 .cloned()
                 .unwrap_or_else(|| state.default_agent_url.clone());
-            // For component agent rooms, send replies as the component's virtual user
-            // rather than @charradissa, since Guilhem is not a member of those rooms.
+            // Every agent (including Guilhem) sends as its own virtual user identity.
+            // sender_from_agent_url extracts the localpart from the agent's k8s service URL.
             let component_sender = sender_from_agent_url(&agent_url);
             let (agent_url, backend, self_user_id) = (agent_url, state.backend.clone(), state.self_user_id.clone());
             tokio::spawn(async move {
@@ -277,9 +277,11 @@ pub async fn handle_transaction(
                     .await
                     .unwrap_or_default();
 
-                // Typing indicator only when sending as @charradissa (i.e. Guilhem's own rooms).
-                // Component rooms: @charradissa is not a member so set_typing would 403.
-                if component_sender.is_none() {
+                // Typing indicator sent as the AS bot (@charradissa) only when the room's agent
+                // IS @charradissa (i.e. the charradissa component room itself). All other agents
+                // have their own identity and are members of their own rooms — but set_typing
+                // would need the agent's own access token, which we don't hold. Suppress for now.
+                if component_sender.as_deref() == Some("charradissa") {
                     let _ = backend.set_typing(&ev.room_id, &self_user_id, true, 120_000).await;
                 }
 
@@ -299,7 +301,7 @@ pub async fn handle_transaction(
                     attempt += 1;
                 }
 
-                if component_sender.is_none() {
+                if component_sender.as_deref() == Some("charradissa") {
                     let _ = backend.set_typing(&ev.room_id, &self_user_id, false, 0).await;
                 }
 
@@ -336,7 +338,7 @@ pub async fn handle_transaction(
 fn sender_from_agent_url(url: &str) -> Option<String> {
     let host = url.split("://").nth(1)?.split('/').next()?.split(':').next()?;
     let first = host.split('.').next()?;
-    first.strip_suffix("-agent").map(str::to_string)
+    Some(first.strip_suffix("-agent").unwrap_or(first).to_string())
 }
 
 /// Returns true when the event sender is an appservice-managed virtual user

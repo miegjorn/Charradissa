@@ -14,13 +14,13 @@
 /// The eight Occitan-stack component agents. Each needs its own exclusive entry
 /// in the appservice user namespace so it can speak as itself in its room.
 pub const COMPONENT_AGENT_LOCALPARTS: [&str; 8] = [
+    "guilhem",
     "gardian",
     "fondament",
     "farga",
     "amassada",
     "cor",
     "caissa",
-    "charradissa-agent",
     "nervi",
 ];
 

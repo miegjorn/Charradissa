@@ -1,9 +1,9 @@
 //! Tests for appservice registration generation.
 //!
-//! The eight component agents (@gardian, @fondament, @farga, @amassada, @cor,
-//! @caissa, @charradissa-agent, @nervi) must each appear in the appservice user
-//! namespace so they can respond as their own Matrix identity rather than as
-//! @charradissa.
+//! The eight component agents (@guilhem, @gardian, @fondament, @farga, @amassada,
+//! @cor, @caissa, @nervi) must each appear in the appservice user namespace so they
+//! can respond as their own Matrix identity. @charradissa is the AS sender itself
+//! and is already in the namespace via sender_localpart.
 
 use charradissa_core::registration::{
     generate_registration, RegistrationParams, COMPONENT_AGENT_LOCALPARTS,
@@ -27,7 +27,7 @@ fn sample_params() -> RegistrationParams {
 #[test]
 fn there_are_eight_canonical_component_agents() {
     assert_eq!(COMPONENT_AGENT_LOCALPARTS.len(), 8);
-    for lp in ["gardian", "fondament", "farga", "amassada", "cor", "caissa", "charradissa-agent", "nervi"] {
+    for lp in ["guilhem", "gardian", "fondament", "farga", "amassada", "cor", "caissa", "nervi"] {
         assert!(
             COMPONENT_AGENT_LOCALPARTS.contains(&lp),
             "canonical component agent {lp} is missing"
