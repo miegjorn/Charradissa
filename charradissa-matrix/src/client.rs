@@ -502,16 +502,20 @@ impl AppserviceClient {
     }
 
     /// Send an `m.image` event to a room referencing an already-uploaded `mxc://` URI.
+    /// `filename` is used as the body and to infer the mimetype for the `info` block
+    /// (SVG files get `image/svg+xml`; everything else defaults to `image/png`).
     pub async fn send_image(&self, room_id: &RoomId, mxc_uri: &str, filename: &str) -> Result<()> {
         let txn = uuid::Uuid::new_v4();
         let url = format!(
             "{}/_matrix/client/v3/rooms/{}/send/m.room.message/{}",
             self.homeserver, pct(room_id.as_str()), txn
         );
+        let mimetype = if filename.ends_with(".svg") { "image/svg+xml" } else { "image/png" };
         let body = serde_json::json!({
             "msgtype": "m.image",
             "body": filename,
             "url": mxc_uri,
+            "info": { "mimetype": mimetype },
         });
         let resp = self.client.put(&url)
             .header("Authorization", self.auth_header())

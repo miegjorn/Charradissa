@@ -20,9 +20,9 @@ pub fn extract_mermaid_blocks(content: &str) -> Vec<String> {
     blocks
 }
 
-/// POST the diagram source to Kroki and return the rendered PNG bytes.
-pub async fn render_png(kroki_url: &str, diagram: &str) -> anyhow::Result<Vec<u8>> {
-    let url = format!("{}/mermaid/png", kroki_url);
+/// POST the diagram source to Kroki and return the rendered SVG bytes.
+pub async fn render_svg(kroki_url: &str, diagram: &str) -> anyhow::Result<Vec<u8>> {
+    let url = format!("{}/mermaid/svg", kroki_url);
     let resp = reqwest::Client::new()
         .post(&url)
         .header("Content-Type", "text/plain")

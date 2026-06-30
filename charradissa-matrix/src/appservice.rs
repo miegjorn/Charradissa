@@ -92,7 +92,7 @@ pub async fn handle_transaction(
                 continue;
             }
 
-            // Mermaid render hook: detect ```mermaid blocks and post rendered PNG.
+            // Diagram render hook: detect ```mermaid blocks and post rendered SVG.
             // Fire-and-forget — does not block agent routing.
             if let Some(kroki_url) = &state.kroki_url {
                 let blocks = charradissa_core::mermaid::extract_mermaid_blocks(&ev.content);
@@ -103,23 +103,23 @@ pub async fn handle_transaction(
                     let blocks = blocks.clone();
                     tokio::spawn(async move {
                         for (i, diagram) in blocks.iter().enumerate() {
-                            match charradissa_core::mermaid::render_png(&kroki, diagram).await {
-                                Ok(png) => {
-                                    match backend.upload_media("image/png", png).await {
+                            match charradissa_core::mermaid::render_svg(&kroki, diagram).await {
+                                Ok(svg) => {
+                                    match backend.upload_media("image/svg+xml", svg).await {
                                         Ok(mxc) => {
                                             let name = if blocks.len() == 1 {
-                                                "diagram.png".to_string()
+                                                "diagram.svg".to_string()
                                             } else {
-                                                format!("diagram-{}.png", i + 1)
+                                                format!("diagram-{}.svg", i + 1)
                                             };
                                             if let Err(e) = backend.send_image(&room, &mxc, &name).await {
-                                                tracing::warn!("mermaid send_image: {}", e);
+                                                tracing::warn!("diagram send_image: {}", e);
                                             }
                                         }
-                                        Err(e) => tracing::warn!("mermaid upload failed: {}", e),
+                                        Err(e) => tracing::warn!("diagram upload failed: {}", e),
                                     }
                                 }
-                                Err(e) => tracing::warn!("mermaid render failed: {}", e),
+                                Err(e) => tracing::warn!("diagram render failed: {}", e),
                             }
                         }
                     });
