@@ -149,4 +149,8 @@ impl PersistentApprovalQueue {
     pub fn list_all(&self) -> Vec<PendingApprovalRecord> {
         self.load()
     }
+
+    pub fn get(&self, id: &str) -> Option<PendingApprovalRecord> {
+        self.load().into_iter().find(|r| r.id == id)
+    }
 }
