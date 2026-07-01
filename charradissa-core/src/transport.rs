@@ -72,7 +72,7 @@ impl Transport for CharradissaTransport {
             context: req.question.clone(),
             model: "claude-haiku-4-5-20251001".to_string(),
             max_tokens: 1024,
-            thinking_budget: None,
+            structured_reasoning: None,
             api_key: None,
             shared_context: None,
             mcp_scopes: vec![],
