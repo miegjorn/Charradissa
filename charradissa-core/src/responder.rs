@@ -103,7 +103,24 @@ impl Responder {
         }
     }
 
-    pub fn build_user_prompt(&self, history: &[ChatEvent], latest: &ChatEvent) -> String {
+    /// `graph_context`, when `Some`, is a collapsed selection from the room's
+    /// persistent `SessionGraph` (see `crate::graph_context`) and replaces the
+    /// raw transcript dump entirely -- it is Guilhem's own recall of what
+    /// matters, not raw history plus a summary. `None` (extraction/Farga
+    /// unreachable, or no frontier nodes yet) falls back to the original
+    /// raw-history behavior unchanged.
+    pub fn build_user_prompt(
+        &self,
+        history: &[ChatEvent],
+        latest: &ChatEvent,
+        graph_context: Option<&str>,
+    ) -> String {
+        if let Some(ctx) = graph_context {
+            return format!(
+                "{}\n\nLatest message from {}:\n{}\n\nReply as Guilhem.",
+                ctx, latest.sender, latest.content
+            );
+        }
         let mut s = String::from("Recent conversation (oldest first):\n");
         for e in history {
             s.push_str(&format!("{}: {}\n", e.sender, e.content));
@@ -403,9 +420,25 @@ impl Responder {
 
     /// Generate a reply, letting Guilhem call read-only Farga tools to ground its answer.
     pub async fn reply(&self, history: &[ChatEvent], latest: &ChatEvent) -> Result<String> {
+        // Collapsed graph context replaces the raw-history dump when available
+        // (see crate::graph_context). Non-fatal: any failure here falls back
+        // to the original raw-history prompt, never blocks the reply.
+        let graph_context = if self.farga_url.is_empty() {
+            None
+        } else {
+            crate::graph_context::build_graph_context(
+                &self.farga_url,
+                latest.room_id.as_str(),
+                history,
+                latest,
+                Some(self.anthropic_api_key.clone()),
+            )
+            .await
+        };
+
         let mut messages: Vec<serde_json::Value> = vec![serde_json::json!({
             "role": "user",
-            "content": self.build_user_prompt(history, latest),
+            "content": self.build_user_prompt(history, latest, graph_context.as_deref()),
         })];
 
         for _round in 0..MAX_TOOL_ROUNDS {
@@ -431,7 +464,7 @@ impl Responder {
                         "max_tokens": MAX_TOKENS,
                         "messages": [
                             {"role": "system", "content": &self.system_prompt},
-                            {"role": "user", "content": self.build_user_prompt(history, latest)}
+                            {"role": "user", "content": self.build_user_prompt(history, latest, graph_context.as_deref())}
                         ]
                     }))
                     .send()
@@ -542,9 +575,23 @@ mod tests {
             ev("@guilhem:occitane.guilhem", "hi"),
         ];
         let latest = ev("@p:occitane.guilhem", "what is farga?");
-        let p = r.build_user_prompt(&hist, &latest);
+        let p = r.build_user_prompt(&hist, &latest, None);
         assert!(p.contains("hello") && p.contains("what is farga?"));
         assert!(p.contains("@p:occitane.guilhem"));
+    }
+
+    #[test]
+    fn graph_context_replaces_raw_history_entirely() {
+        let r = responder();
+        let hist = vec![ev("@p:occitane.guilhem", "hello")];
+        let latest = ev("@p:occitane.guilhem", "what is farga?");
+        let p = r.build_user_prompt(&hist, &latest, Some("collapsed: farga is durable memory"));
+        assert!(p.contains("collapsed: farga is durable memory"));
+        assert!(p.contains("what is farga?"));
+        // raw history must NOT leak in alongside the collapsed context --
+        // the whole point is that "hello" is either represented in the
+        // collapse or it isn't, not appended redundantly either way.
+        assert!(!p.contains("Recent conversation"));
     }
 
     #[test]

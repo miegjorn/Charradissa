@@ -8,6 +8,7 @@ pub mod dm_registry;
 pub mod backend;
 pub mod task;
 pub mod farga;
+pub mod graph_context;
 pub mod tool_loop;
 pub mod approval;
 pub mod concierge;
