@@ -577,7 +577,7 @@ async fn integration_claude_analyzer_produces_connections() {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .expect("ANTHROPIC_API_KEY required for integration test");
 
-    let analyzer = ClaudeFarcasterAnalyzer::new(api_key);
+    let analyzer = ClaudeFarcasterAnalyzer::new(api_key, None);
 
     let event = MilestoneEvent::ArtifactProduced {
         mission_id: "m1".into(),
