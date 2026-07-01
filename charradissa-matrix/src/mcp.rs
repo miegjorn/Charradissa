@@ -44,6 +44,7 @@ pub struct MatrixMcp {
     dm_registry: DmRegistry,
     approval_queue: Arc<PersistentApprovalQueue>,
     approval_room_id: String,
+    approval_timeout_minutes: u64,
 }
 
 impl MatrixMcp {
@@ -52,8 +53,9 @@ impl MatrixMcp {
         dm_registry: DmRegistry,
         approval_queue: Arc<PersistentApprovalQueue>,
         approval_room_id: String,
+        approval_timeout_minutes: u64,
     ) -> Self {
-        Self { client, dm_registry, approval_queue, approval_room_id }
+        Self { client, dm_registry, approval_queue, approval_room_id, approval_timeout_minutes }
     }
 
     /// The tool definitions advertised by `tools/list`.
@@ -303,9 +305,42 @@ impl MatrixMcp {
                     .await
                     .map_err(|e| e.to_string())?;
 
-                Ok(format!("approval_id: {id} — posted to approval room. Stop working and wait for approval notification in your Matrix room."))
+                self.wait_for_resolution(&id).await
             }
             other => Err(format!("unknown tool: {other}")),
+        }
+    }
+
+    /// Poll the approval queue until `id` resolves or the configured timeout elapses.
+    /// Fails closed: a timeout is treated as a rejection, never as an approval.
+    async fn wait_for_resolution(&self, id: &str) -> std::result::Result<String, String> {
+        use charradissa_core::approval::ApprovalStatus;
+
+        let poll_interval = std::time::Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(self.approval_timeout_minutes * 60);
+
+        loop {
+            if let Some(record) = self.approval_queue.get(id) {
+                match record.status {
+                    ApprovalStatus::Approved => {
+                        return Ok(format!("approval_id: {id} — approved. Proceed."));
+                    }
+                    ApprovalStatus::Rejected(reason) => {
+                        return Err(format!("approval_id: {id} — rejected: {reason}"));
+                    }
+                    ApprovalStatus::Pending => {}
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let _ = self.approval_queue.reject(id, "timeout".to_string());
+                return Err(format!(
+                    "approval_id: {id} — timed out after {} minutes waiting for approval. \
+                     Treated as rejected. Do not merge.",
+                    self.approval_timeout_minutes
+                ));
+            }
+            tokio::time::sleep(poll_interval).await;
         }
     }
 }
@@ -345,16 +380,23 @@ mod tests {
     }
 
     fn mcp_for(server: &MockServer, reg: DmRegistry) -> MatrixMcp {
+        mcp_for_with_queue(server, reg, Arc::new(charradissa_core::approval::PersistentApprovalQueue::new(
+            std::env::temp_dir().join(format!("test-queue-{}.json", uuid::Uuid::new_v4())),
+        )))
+    }
+
+    fn mcp_for_with_queue(
+        server: &MockServer,
+        reg: DmRegistry,
+        approval_queue: Arc<charradissa_core::approval::PersistentApprovalQueue>,
+    ) -> MatrixMcp {
         let client = Arc::new(AppserviceClient::new(
             server.uri(),
             "test-as-token".to_string(),
             "@charradissa:occitane.guilhem".to_string(),
             "occitane.guilhem".to_string(),
         ));
-        let approval_queue = Arc::new(charradissa_core::approval::PersistentApprovalQueue::new(
-            std::path::PathBuf::from("/tmp/test-charradissa-approval-queue.json"),
-        ));
-        MatrixMcp::new(client, reg, approval_queue, String::new())
+        MatrixMcp::new(client, reg, approval_queue, String::new(), 60)
     }
 
     // ---- tools/list & initialize ------------------------------------------------------
@@ -629,5 +671,67 @@ mod tests {
         let mcp = mcp_for(&server, registry());
         let out = mcp.call_tool("matrix_teleport", &json!({})).await;
         assert!(out.is_err());
+    }
+
+    // ---- matrix_request_approval blocking behavior -------------------------------------
+
+    #[tokio::test(start_paused = true)]
+    async fn matrix_request_approval_blocks_until_approved() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path_regex(r"^/_matrix/client/v3/rooms/.*/send/m\.room\.message/.*$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"event_id": "$e"})))
+            .mount(&server)
+            .await;
+        let approval_queue = Arc::new(charradissa_core::approval::PersistentApprovalQueue::new(
+            std::env::temp_dir().join(format!("test-queue-{}.json", uuid::Uuid::new_v4())),
+        ));
+        let mcp = Arc::new(mcp_for_with_queue(&server, registry(), Arc::clone(&approval_queue)));
+
+        let approver_queue = Arc::clone(&approval_queue);
+        tokio::spawn(async move {
+            // Wait for the record to show up, then approve it.
+            loop {
+                if let Some(record) = approver_queue.list_pending().into_iter().next() {
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    approver_queue.approve(&record.id).expect("approve should succeed");
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        });
+
+        let result = mcp
+            .call_tool("matrix_request_approval", &json!({"component": "amassada", "description": "test PR"}))
+            .await;
+        assert!(result.is_ok(), "expected approval to resolve Ok, got {result:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn matrix_request_approval_times_out_and_rejects() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path_regex(r"^/_matrix/client/v3/rooms/.*/send/m\.room\.message/.*$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"event_id": "$e"})))
+            .mount(&server)
+            .await;
+        let approval_queue = Arc::new(charradissa_core::approval::PersistentApprovalQueue::new(
+            std::env::temp_dir().join(format!("test-queue-{}.json", uuid::Uuid::new_v4())),
+        ));
+        let client = Arc::new(AppserviceClient::new(
+            server.uri(),
+            "test-as-token".to_string(),
+            "@charradissa:occitane.guilhem".to_string(),
+            "occitane.guilhem".to_string(),
+        ));
+        // timeout_minutes = 0 → deadline is "now", so the first poll check times out
+        // immediately without waiting a full interval. Deterministic under start_paused.
+        let mcp = MatrixMcp::new(client, registry(), Arc::clone(&approval_queue), String::new(), 0);
+
+        let result = mcp
+            .call_tool("matrix_request_approval", &json!({"component": "amassada", "description": "test PR"}))
+            .await;
+        assert!(result.is_err(), "expected timeout to reject, got {result:?}");
+        assert!(result.unwrap_err().contains("timed out"));
     }
 }

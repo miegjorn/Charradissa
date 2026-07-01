@@ -252,6 +252,7 @@ async fn main() -> anyhow::Result<()> {
             dm_registry,
             Arc::clone(&persistent_queue),
             approval_room_id,
+            config.approval.timeout_minutes,
         ),
     );
 
