@@ -38,7 +38,8 @@ const MAX_TOOL_RESULT_CHARS: usize = 6000;
 
 pub struct Responder {
     client: reqwest::Client,
-    api_key: String,
+    anthropic_api_key: String,
+    xai_api_key: Option<String>,
     model: String,
     pub server_name: String,
     /// Base URL of Farga's HTTP API (e.g. http://farga:7500), used by the read-only tools.
@@ -55,13 +56,14 @@ pub struct Responder {
 
 impl Responder {
     pub fn new(api_key: String, model: String, server_name: String, farga_url: String, dispatcher_url: String, amassada_url: String) -> Self {
-        Self::with_config(api_key, model, server_name, farga_url, dispatcher_url, amassada_url, GUILHEM_SYSTEM.to_string(), true)
+        Self::with_config(api_key, None, model, server_name, farga_url, dispatcher_url, amassada_url, GUILHEM_SYSTEM.to_string(), true)
     }
 
-    pub fn with_config(api_key: String, model: String, server_name: String, farga_url: String, dispatcher_url: String, amassada_url: String, system_prompt: String, is_org_agent: bool) -> Self {
+    pub fn with_config(anthropic_api_key: String, xai_api_key: Option<String>, model: String, server_name: String, farga_url: String, dispatcher_url: String, amassada_url: String, system_prompt: String, is_org_agent: bool) -> Self {
         Self {
             client: reqwest::Client::new(),
-            api_key,
+            anthropic_api_key,
+            xai_api_key,
             model,
             server_name,
             farga_url: farga_url.trim_end_matches('/').to_string(),
@@ -418,20 +420,41 @@ impl Responder {
                 "messages": messages,
             });
 
-            let data: serde_json::Value = self
-                .client
-                .post("https://api.anthropic.com/v1/messages")
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("anthropic-beta", "prompt-caching-2024-07-31")
-                .header("content-type", "application/json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| CharradissaError::Dispatch(e.to_string()))?
-                .json()
-                .await
-                .map_err(|e| CharradissaError::Dispatch(e.to_string()))?;
+            let data: serde_json::Value = if self.model.starts_with("grok") || self.model.starts_with("xai") {
+                let api_key = self.xai_api_key.as_ref().ok_or_else(|| CharradissaError::Dispatch("XAI_API_KEY not set".into()))?;
+                self.client
+                    .post("https://api.x.ai/v1/chat/completions")
+                    .header("Authorization", format!("Bearer {}", api_key))
+                    .header("Content-Type", "application/json")
+                    .json(&serde_json::json!({
+                        "model": self.model,
+                        "max_tokens": MAX_TOKENS,
+                        "messages": [
+                            {"role": "system", "content": &self.system_prompt},
+                            {"role": "user", "content": self.build_user_prompt(history, latest)}
+                        ]
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| CharradissaError::Dispatch(e.to_string()))?
+                    .json()
+                    .await
+                    .map_err(|e| CharradissaError::Dispatch(e.to_string()))?
+            } else {
+                self.client
+                    .post("https://api.anthropic.com/v1/messages")
+                    .header("x-api-key", &self.anthropic_api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .header("anthropic-beta", "prompt-caching-2024-07-31")
+                    .header("content-type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| CharradissaError::Dispatch(e.to_string()))?
+                    .json()
+                    .await
+                    .map_err(|e| CharradissaError::Dispatch(e.to_string()))?
+            };
 
             if let Some(err) = data.get("error") {
                 return Err(CharradissaError::Dispatch(err.to_string()));
@@ -562,7 +585,7 @@ mod tests {
     #[test]
     fn component_tool_set_has_only_farga_tools() {
         let r = Responder::with_config(
-            "k".into(), "claude-sonnet-4-6".into(), "occitane.guilhem".into(),
+            "k".into(), None, "claude-sonnet-4-6".into(), "occitane.guilhem".into(),
             "http://farga:7500/".into(), "http://dispatcher:9090/mcp".into(),
             "http://amassada:7700".into(), "You are the amassada agent.".into(), false,
         );

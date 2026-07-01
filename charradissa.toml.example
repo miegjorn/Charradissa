@@ -47,5 +47,5 @@ endpoint = "http://amassada.agents.svc.cluster.local:7700/sessions/{session_id}/
 # HTTP pod. Useful for lightweight helpers that don't need their own container.
 [[component_agents]]
 room_id = "!help-room:occitane.guilhem"
-model   = "claude-opus-4-5"
+model   = "claude-opus-4-5"  # or "grok-3" for complementary (requires XAI_API_KEY)
 system  = "You are a helpful assistant embedded in Matrix."

@@ -13,6 +13,7 @@ pub struct RoomProvisioningParams {
     pub farga_url: String,
     pub fondament_url: String,
     pub anthropic_api_key: String,
+    pub xai_api_key: Option<String>,
     pub dispatcher_url: String,
     pub amassada_url: String,
 }
@@ -134,6 +135,7 @@ impl MatrixBackend {
                     tracing::info!("component room #{}: {} ready", component, room_id.as_str());
                     let responder = Arc::new(Responder::with_config(
                         params.anthropic_api_key.clone(),
+                        params.xai_api_key.clone(),
                         "claude-sonnet-4-6".into(),
                         server_name.clone(),
                         params.farga_url.clone(),
@@ -380,6 +382,7 @@ mod tests {
             farga_url: mock_uri.to_string(),
             fondament_url: mock_uri.to_string(),
             anthropic_api_key: "test-key".to_string(),
+            xai_api_key: None,
             dispatcher_url: "http://dispatcher:9090/mcp".to_string(),
             amassada_url: "http://amassada:7700".to_string(),
         }
@@ -515,6 +518,7 @@ mod tests {
             farga_url: "http://farga:7500".into(),
             fondament_url: "http://fondament:7800".into(),
             anthropic_api_key: "key".into(),
+            xai_api_key: None,
             dispatcher_url: "http://dispatcher:9090/mcp".into(),
             amassada_url: "http://amassada:7700".into(),
         };

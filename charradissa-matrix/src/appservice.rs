@@ -483,7 +483,7 @@ mod tests {
         let room_id = "!amassada:occitane.guilhem";
         let mut map: HashMap<String, Arc<Responder>> = HashMap::new();
         let r = Arc::new(Responder::with_config(
-            "k".into(), "m".into(), "s".into(),
+            "k".into(), None, "m".into(), "s".into(),
             "http://f".into(), "http://d".into(), "http://a".into(),
             "amassada context".into(), false,
         ));

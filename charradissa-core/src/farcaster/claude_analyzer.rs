@@ -15,21 +15,59 @@ const DIGEST_MAX_TOKENS: u32 = 4096;
 
 pub struct ClaudeFarcasterAnalyzer {
     client: reqwest::Client,
-    api_key: String,
+    anthropic_api_key: String,
+    xai_api_key: Option<String>,
 }
 
 impl ClaudeFarcasterAnalyzer {
-    pub fn new(api_key: String) -> Self {
-        Self { client: reqwest::Client::new(), api_key }
+    pub fn new(anthropic_api_key: String, xai_api_key: Option<String>) -> Self {
+        Self { 
+            client: reqwest::Client::new(), 
+            anthropic_api_key,
+            xai_api_key 
+        }
     }
 
-    async fn call_claude(
+    async fn call_llm(
         &self,
         model: &str,
         system: &str,
         user: &str,
         max_tokens: u32,
     ) -> Result<(String, u32)> {
+        if model.starts_with("grok") || model.starts_with("xai") {
+            let api_key = self.xai_api_key.as_ref()
+                .ok_or_else(|| CharradissaError::Dispatch("XAI_API_KEY not set for grok model".into()))?;
+            let body = serde_json::json!({
+                "model": model,
+                "max_tokens": max_tokens,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user}
+                ]
+            });
+
+            let resp = self.client
+                .post("https://api.x.ai/v1/chat/completions")
+                .header("Authorization", format!("Bearer {}", api_key))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send().await
+                .map_err(|e| CharradissaError::Dispatch(e.to_string()))?;
+
+            let data: serde_json::Value = resp.json().await
+                .map_err(|e| CharradissaError::Dispatch(e.to_string()))?;
+
+            let text = data["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            // xAI doesn't return exact token counts in same way, approximate
+            let tokens = (text.len() / 4) as u32; 
+            return Ok((text, tokens));
+        }
+
+        // Anthropic path
         let body = serde_json::json!({
             "model": model,
             "max_tokens": max_tokens,
@@ -39,7 +77,7 @@ impl ClaudeFarcasterAnalyzer {
 
         let resp = self.client
             .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", &self.api_key)
+            .header("x-api-key", &self.anthropic_api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
             .json(&body)
@@ -126,7 +164,7 @@ impl FarcasterAnalyzer for ClaudeFarcasterAnalyzer {
             snapshot_text.join("\n\n")
         );
 
-        let (text, tokens) = self.call_claude(HAIKU_MODEL, REACTIVE_SYSTEM, &user, REACTIVE_MAX_TOKENS).await?;
+        let (text, tokens) = self.call_llm(HAIKU_MODEL, REACTIVE_SYSTEM, &user, REACTIVE_MAX_TOKENS).await?;
 
         // Extract JSON array from response (may be wrapped in markdown code block)
         let json_str = extract_json(&text);
@@ -158,7 +196,7 @@ impl FarcasterAnalyzer for ClaudeFarcasterAnalyzer {
 
         let user = format!("Connections observed:\n{}", entries_text.join("\n"));
 
-        let (text, tokens) = self.call_claude(OPUS_MODEL, DIGEST_SYSTEM, &user, DIGEST_MAX_TOKENS).await?;
+        let (text, tokens) = self.call_llm(OPUS_MODEL, DIGEST_SYSTEM, &user, DIGEST_MAX_TOKENS).await?;
 
         let json_str = extract_json(&text);
         let parsed: SynthesisJson = serde_json::from_str(json_str)

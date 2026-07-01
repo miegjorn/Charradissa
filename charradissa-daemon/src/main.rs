@@ -54,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = milestone_tx; // suppress unused warning until appservice wiring is added
 
     let anthropic_api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    let xai_api_key = std::env::var("XAI_API_KEY").ok();
     let farga_base_url = std::env::var("FARGA_URL")
         .unwrap_or_else(|_| "http://farga:7500".into());
 
@@ -73,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
         Box::new(FarcasterAgent::new(
             Arc::clone(&backend) as Arc<dyn charradissa_core::backend::ChatBackend>,
             Arc::new(HttpFargaWriter::new(farga_base_url.clone())),
-            Arc::new(ClaudeFarcasterAnalyzer::new(anthropic_api_key.clone())),
+            Arc::new(ClaudeFarcasterAnalyzer::new(anthropic_api_key.clone(), xai_api_key.clone())),
             vec![], // projects populated from config in a future task
             HashMap::new(),
         )),
@@ -135,6 +136,7 @@ async fn main() -> anyhow::Result<()> {
         farga_url: farga_base_url.clone(),
         fondament_url,
         anthropic_api_key: anthropic_api_key.clone(),
+        xai_api_key: xai_api_key.clone(),
         dispatcher_url: std::env::var("DISPATCHER_URL")
             .unwrap_or_else(|_| "http://dispatcher.agents.svc.cluster.local:9090/mcp".into()),
         amassada_url: std::env::var("AMASSADA_URL")
@@ -168,6 +170,7 @@ async fn main() -> anyhow::Result<()> {
             }
             let responder = Arc::new(Responder::with_config(
                 anthropic_api_key.clone(),
+                xai_api_key.clone(),
                 "claude-sonnet-4-6".into(),
                 server_name.clone(),
                 farga_base_url.clone(),

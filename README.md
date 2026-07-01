@@ -2,6 +2,8 @@
 
 **Charradissa** (Occitan: *chat/conversation*) is the Matrix-chat runtime of the Occitan stack. It hosts multiple AI agents as persistent members of a Matrix chat system: projects live as rooms, agents live as room members. Charradissa consumes `amassada-core` as a library and implements its `Transport` trait for Matrix rooms.
 
+Grok support: models can be set to "grok-*" (with XAI_API_KEY) for complementary inter-mingling with Claude in agents and farcaster analysis.
+
 Charradissa is **dual-mode**:
 - A lightweight **tool loop** for single-turn, synchronous agent interactions.
 - A full **Amassada session engine** for structured, multi-agent, multi-round collaborative work.
