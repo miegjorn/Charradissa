@@ -11,6 +11,25 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Room IDs for the 9 agents that now run independent Matrix sessions
+/// (guilhem + 8 component agents). Messages in these rooms are never
+/// relayed by Charradissa — each agent's own pod handles its own room via
+/// its own /sync loop (see Caissa's run_matrix_client_loop). Without this
+/// guard, once component_agents/agents.routes are emptied (Task 7), these
+/// rooms would silently fall through to the default_agent_url branch below
+/// and get double-relayed.
+const MIGRATED_AGENT_ROOM_IDS: &[&str] = &[
+    "!hTNBZpYDxyvfcuralm:occitane.guilhem", // guilhem
+    "!bwuKXFvUXnVZfXcKuz:occitane.guilhem", // gardian
+    "!KuWBSmYyvyiyTMFKqJ:occitane.guilhem", // fondament
+    "!CtktMiOTNtSIkdwOxq:occitane.guilhem", // farga
+    "!vLjgiURMSlkqTXgaDG:occitane.guilhem", // amassada
+    "!FgfTbZMpLLVGiISZTj:occitane.guilhem", // cor
+    "!ZqGBDioAYnOATihiEU:occitane.guilhem", // caissa
+    "!qZGQFrjAcKjPinhQnp:occitane.guilhem", // charradissa
+    "!QQeweqsLsOTZYdonXi:occitane.guilhem", // nervi
+];
+
 #[derive(Clone)]
 pub struct AppserviceState {
     pub hs_token: String,
@@ -89,6 +108,13 @@ pub async fn handle_transaction(
             // Also ignore messages sent by appservice-managed virtual users
             // (e.g. @farga, @gardian) — they are our own echoes.
             if is_appservice_sender(ev.sender.as_str(), &state.self_user_id) {
+                continue;
+            }
+
+            // These 9 rooms are handled entirely by their own agent's independent
+            // Matrix session now — never relay, regardless of what project_routes/
+            // component_agents/default_agent_url would otherwise say.
+            if MIGRATED_AGENT_ROOM_IDS.contains(&ev.room_id.as_str()) {
                 continue;
             }
 
@@ -475,6 +501,13 @@ mod tests {
         assert!(token_ok(Some("good"), "good")); // correct token accepted
         assert!(!token_ok(Some("bad"), "good")); // wrong token rejected
         assert!(!token_ok(None, "good")); // missing token rejected
+    }
+
+    #[test]
+    fn migrated_room_ids_include_all_nine_agents() {
+        assert_eq!(MIGRATED_AGENT_ROOM_IDS.len(), 9);
+        assert!(MIGRATED_AGENT_ROOM_IDS.contains(&"!hTNBZpYDxyvfcuralm:occitane.guilhem")); // guilhem
+        assert!(MIGRATED_AGENT_ROOM_IDS.contains(&"!qZGQFrjAcKjPinhQnp:occitane.guilhem")); // charradissa
     }
 
     #[test]
