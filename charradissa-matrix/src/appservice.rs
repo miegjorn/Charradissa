@@ -19,7 +19,7 @@ use std::sync::Arc;
 /// rooms would silently fall through to the default_agent_url branch below
 /// and get double-relayed.
 const MIGRATED_AGENT_ROOM_IDS: &[&str] = &[
-    "!hTNBZpYDxyvfcuralm:occitane.guilhem", // guilhem
+    "!iNQRqUAMckCUQrSFHk:occitane.guilhem", // guilhem (#occitan, the project room/Space)
     "!bwuKXFvUXnVZfXcKuz:occitane.guilhem", // gardian
     "!KuWBSmYyvyiyTMFKqJ:occitane.guilhem", // fondament
     "!CtktMiOTNtSIkdwOxq:occitane.guilhem", // farga
@@ -506,7 +506,7 @@ mod tests {
     #[test]
     fn migrated_room_ids_include_all_nine_agents() {
         assert_eq!(MIGRATED_AGENT_ROOM_IDS.len(), 9);
-        assert!(MIGRATED_AGENT_ROOM_IDS.contains(&"!hTNBZpYDxyvfcuralm:occitane.guilhem")); // guilhem
+        assert!(MIGRATED_AGENT_ROOM_IDS.contains(&"!iNQRqUAMckCUQrSFHk:occitane.guilhem")); // guilhem (#occitan)
         assert!(MIGRATED_AGENT_ROOM_IDS.contains(&"!qZGQFrjAcKjPinhQnp:occitane.guilhem")); // charradissa
     }
 
