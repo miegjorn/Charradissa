@@ -244,12 +244,17 @@ async fn main() -> anyhow::Result<()> {
 /// Build the Synapse appservice registration YAML from config and environment.
 ///
 /// Tokens come from `MATRIX_AS_TOKEN` / `MATRIX_HS_TOKEN`; the callback URL from
-/// `CHARRADISSA_URL` (defaulting to the in-cluster Service URL). The user
-/// namespace grants each of the seven component agents its own Matrix identity.
+/// `CHARRADISSA_URL` (defaulting to the in-cluster Service URL).
+///
+/// `component_localparts` is intentionally empty: guilhem and the 8 component
+/// agents are now real, independently-registered Matrix users (see Occitan's
+/// per-agent-matrix-independence work), not appservice-exclusive ghosts —
+/// claiming their usernames here would make Synapse reject the bootstrap
+/// job's registration of those same usernames with M_EXCLUSIVE. This appservice
+/// only still owns its own sender identity and any `@charradissa-relay-*`
+/// specialist virtual users.
 fn build_registration(config: &Config) -> String {
-    use charradissa_core::registration::{
-        generate_registration, RegistrationParams, COMPONENT_AGENT_LOCALPARTS,
-    };
+    use charradissa_core::registration::{generate_registration, RegistrationParams};
 
     let listen_port = charradissa_core::config::listen_port();
     let params = RegistrationParams {
@@ -258,12 +263,9 @@ fn build_registration(config: &Config) -> String {
             .unwrap_or_else(|_| format!("http://charradissa:{listen_port}")),
         as_token: std::env::var("MATRIX_AS_TOKEN").unwrap_or_else(|_| "dev-token".into()),
         hs_token: std::env::var("MATRIX_HS_TOKEN").unwrap_or_else(|_| "dev-hs-token".into()),
-        sender_localpart: "charradissa".into(),
+        sender_localpart: "charradissa-relay".into(),
         server_name: config.org.server_name.clone(),
-        component_localparts: COMPONENT_AGENT_LOCALPARTS
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
+        component_localparts: vec![],
     };
     generate_registration(&params)
 }
