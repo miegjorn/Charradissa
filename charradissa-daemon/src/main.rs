@@ -38,7 +38,12 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "dev-token".into());
     let hs_token = charradissa_core::config::hs_token(&as_token);
     let server_name = config.org.server_name.clone();
-    let bot_user_id = format!("@charradissa:{}", server_name);
+    // Renamed off @charradissa: that Matrix username is now the independent
+    // charradissa *component agent*'s own identity (it chronicles the
+    // Charradissa GitHub repo) — see Occitan#per-agent-matrix-independence.
+    // This relay identity keeps the DM fabric, #occitan project room, and
+    // concierge archival responsibilities, none of which this rename affects.
+    let bot_user_id = format!("@charradissa-relay:{}", server_name);
 
     let backend = Arc::new(MatrixBackend::new(
         config.org.homeserver.clone(),
@@ -124,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = backend.ensure_registered().await {
         tracing::warn!("self-registration failed: {}", e);
     }
-    if let Err(e) = backend.set_self_display_name("Guilhem").await {
+    if let Err(e) = backend.set_self_display_name("Charradissa").await {
         tracing::warn!("set display name failed: {}", e);
     }
 
@@ -143,48 +148,14 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|_| "http://amassada:7700".into()),
     };
 
-    // Dynamic provisioning: query Farga for each project's components, resolve system
-    // prompts via Fondament, and create/join the corresponding Matrix rooms.
-    let mut component_agents = HashMap::new();
-    for project in &config.provisioning.projects {
-        match backend.provision_project_rooms(project, &provisioning_params).await {
-            Ok(rooms) => {
-                tracing::info!("provisioned {} rooms for project '{}'", rooms.len(), project);
-                for (room_id, (localpart, responder)) in rooms {
-                    component_agents.insert(room_id.as_str().to_string(), (localpart, responder));
-                }
-            }
-            Err(e) => {
-                tracing::warn!("provisioning failed for project '{}': {}", project, e);
-            }
-        }
-    }
-
-    // Fallback: if provisioning yielded nothing (Farga/Fondament unavailable at startup),
-    // fall back to static [component_agents] config entries.
-    if component_agents.is_empty() {
-        for ca in &config.component_agents {
-            if ca.room_id.is_empty() {
-                tracing::warn!("component agent '{}' has no room_id configured, skipping", ca.name);
-                continue;
-            }
-            let responder = Arc::new(Responder::with_config(
-                anthropic_api_key.clone(),
-                xai_api_key.clone(),
-                "claude-sonnet-4-6".into(),
-                server_name.clone(),
-                farga_base_url.clone(),
-                std::env::var("DISPATCHER_URL")
-                    .unwrap_or_else(|_| "http://dispatcher.agents.svc.cluster.local:9090/mcp".into()),
-                std::env::var("AMASSADA_URL")
-                    .unwrap_or_else(|_| "http://amassada:7700".into()),
-                ca.system_prompt.clone(),
-                false, // component agents do not get org-level tools
-            ));
-            tracing::info!("registered component agent '{}' for room {} (config fallback)", ca.name, ca.room_id);
-            component_agents.insert(ca.room_id.clone(), (ca.name.clone(), responder));
-        }
-    }
+    // Component agents (gardian, fondament, farga, amassada, cor, caissa,
+    // charradissa, nervi) and guilhem now run their own independent Matrix
+    // sessions (see Caissa/caissa-cli/src/commands/listen.rs's
+    // run_matrix_client_loop) — Charradissa no longer provisions or relays
+    // for their rooms. `provisioning_params` and `RoomProvisioningParams`
+    // are kept (used by nothing now, harmless) rather than threading a
+    // larger removal through this file; a future cleanup can drop them.
+    let component_agents: HashMap<String, (String, Arc<Responder>)> = HashMap::new();
 
     // Build project_routes: expand each ProjectAgentConfig's room list into
     // a flat room_id → config map (cloning the config per room so the lookup
