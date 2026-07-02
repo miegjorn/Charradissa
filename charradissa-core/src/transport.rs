@@ -56,21 +56,10 @@ impl Transport for CharradissaTransport {
     }
 
     async fn consult(&self, req: &ConsultRequest) -> AmassadaResult<ConsultResponse> {
-        // Parse persona from agent_id (e.g. "builder-1" → "builder")
-        let persona = req.target.to_string();
-        let persona_hint = persona.split('-').next().unwrap_or("specialist");
-
-        let system = format!(
-            "You are {} — a specialist agent. \
-             Answer the following question concisely and with practical, expert-level insight. \
-             Respond only with the answer, no preamble.",
-            persona_hint
-        );
-
         let resp = dispatch::dispatch(dispatch::TurnRequest {
-            system_prompt: system,
+            system_prompt: req.system_prompt.clone(),
             context: req.question.clone(),
-            model: "claude-haiku-4-5-20251001".to_string(),
+            model: req.model.clone(),
             max_tokens: 1024,
             structured_reasoning: None,
             api_key: None,
@@ -81,6 +70,7 @@ impl Transport for CharradissaTransport {
         Ok(ConsultResponse {
             from: req.target.clone(),
             content: resp.text,
+            tokens_used: resp.input_tokens + resp.output_tokens,
         })
     }
 
