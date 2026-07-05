@@ -3,7 +3,6 @@ use chrono::Duration;
 use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::types::ProjectId;
-use crate::farcaster::governance::GovernanceContribution;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Signal {
@@ -61,22 +60,6 @@ pub struct MissionContribution {
 pub trait FargaWriter: Send + Sync {
     async fn write_signals(&self, project: &ProjectId, signals: Vec<Signal>) -> Result<()>;
     async fn recent_signals(&self, project: &ProjectId, since: Duration) -> Result<Vec<Signal>>;
-    // Fallback for testing and non-HTTP backends. Flattens the contribution into
-    // a Signal write. Real HTTP backends override this with a dedicated endpoint.
-    async fn submit_governance_contribution(
-        &self,
-        contribution: GovernanceContribution,
-    ) -> Result<String> {
-        let content = serde_json::to_string(&contribution)
-            .map_err(|e| crate::error::CharradissaError::Dispatch(e.to_string()))?;
-        let signal = Signal {
-            project: "system".to_string(),
-            content,
-            source: "farcaster-governance".to_string(),
-        };
-        self.write_signals(&ProjectId::new("system"), vec![signal]).await?;
-        Ok(String::new())
-    }
     async fn submit_governance_decision(&self, decision: GovernanceDecision) -> Result<()>;
     async fn get_assessment(&self, _node_id: &str) -> Result<Option<AssessmentResult>> {
         Ok(None)
@@ -126,24 +109,6 @@ impl FargaWriter for HttpFargaWriter {
             .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))?;
         resp.json().await
             .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))
-    }
-
-    async fn submit_governance_contribution(
-        &self,
-        contribution: GovernanceContribution,
-    ) -> Result<String> {
-        let url = format!("{}/governance", self.base_url);
-        let resp = self.client
-            .post(&url)
-            .json(&contribution)
-            .send()
-            .await
-            .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))?
-            .error_for_status()
-            .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))?;
-        let json: serde_json::Value = resp.json().await
-            .map_err(|e| crate::error::CharradissaError::Backend(e.to_string()))?;
-        Ok(json["id"].as_str().unwrap_or("").to_string())
     }
 
     async fn submit_governance_decision(&self, decision: GovernanceDecision) -> Result<()> {

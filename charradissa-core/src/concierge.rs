@@ -4,9 +4,6 @@ use chrono::Utc;
 use tokio::time::interval;
 use crate::backend::ChatBackend;
 use crate::farga::{FargaWriter, Signal};
-use crate::farcaster::milestone::MilestoneEvent;
-use crate::farcaster::observation::ObservationEvent;
-use crate::farcaster::system_agent::SystemAgent;
 use crate::types::{ChatEvent, ProjectId, RoomId, UserId};
 
 pub fn extract_signals(events: &[ChatEvent]) -> Vec<Signal> {
@@ -46,8 +43,6 @@ pub struct ConciergeAgent {
     archival_interval_hours: u64,
     convergence_interval_hours: u64,
     daily_token_budget: u32,
-    system_agents: Vec<Box<dyn SystemAgent>>,
-    system_agent_tick_intervals: Vec<Duration>,
 }
 
 impl ConciergeAgent {
@@ -63,51 +58,6 @@ impl ConciergeAgent {
         Self {
             backend, farga, projects, project_agent_ids,
             archival_interval_hours, convergence_interval_hours, daily_token_budget,
-            system_agents: Vec::new(),
-            system_agent_tick_intervals: Vec::new(),
-        }
-    }
-
-    pub fn register_system_agent(&mut self, agent: Box<dyn SystemAgent>, tick_interval: Duration) {
-        self.system_agents.push(agent);
-        self.system_agent_tick_intervals.push(tick_interval);
-    }
-
-    pub async fn dispatch_milestone(&self, event: &MilestoneEvent) {
-        for agent in &self.system_agents {
-            if let Err(e) = agent.on_milestone(event).await {
-                tracing::error!("[{}] on_milestone error: {}", agent.name(), e);
-            }
-        }
-    }
-
-    /// Dispatch any observation event (project milestone or domain digest) to all system agents.
-    /// Use this instead of dispatch_milestone when Phase II fractal routing is needed.
-    pub async fn dispatch_observation(&self, event: &ObservationEvent) {
-        for agent in &self.system_agents {
-            if let Err(e) = agent.on_observation(event).await {
-                tracing::error!("[{}] on_observation error: {}", agent.name(), e);
-            }
-        }
-    }
-
-    pub async fn run_system_agent_ticks(&self) {
-        let mut ticker = interval(Duration::from_secs(60));
-        let mut next_tick: Vec<tokio::time::Instant> = self.system_agent_tick_intervals
-            .iter()
-            .map(|d| tokio::time::Instant::now() + *d)
-            .collect();
-        loop {
-            ticker.tick().await;
-            let now = tokio::time::Instant::now();
-            for (i, agent) in self.system_agents.iter().enumerate() {
-                if now >= next_tick[i] {
-                    if let Err(e) = agent.tick().await {
-                        tracing::error!("[{}] tick error: {}", agent.name(), e);
-                    }
-                    next_tick[i] = now + self.system_agent_tick_intervals[i];
-                }
-            }
         }
     }
 
