@@ -82,7 +82,7 @@ async fn run_request_consumer(nervi: nervi_core::NerviClient, queue: Arc<Persist
             }
         };
 
-        let id = match queue.register(&room_id, &req.category, &req.description, req.params.clone()).await {
+        let id = match queue.register(&room_id, &req.category, &req.description, req.params).await {
             Ok(id) => id,
             Err(e) => {
                 tracing::error!("approval_relay: register failed: {}", e);
@@ -118,6 +118,25 @@ async fn run_request_consumer(nervi: nervi_core::NerviClient, queue: Arc<Persist
     }
 }
 
+/// Parse a `/approve <id>` or `/reject <id> [reason]` chat message into
+/// (id, reason) -- `None` reason means approve, `Some` means reject. A
+/// missing or blank reason after `/reject <id>` defaults to "rejected by
+/// operator" rather than an empty string.
+fn parse_resolution_command(content: &str) -> Option<(String, Option<String>)> {
+    let content = content.trim();
+    if let Some(rest) = content.strip_prefix("/approve ") {
+        Some((rest.trim().to_string(), None))
+    } else if let Some(rest) = content.strip_prefix("/reject ") {
+        let mut parts = rest.splitn(2, ' ');
+        let id = parts.next().unwrap_or("").trim().to_string();
+        let reason = parts.next().unwrap_or("").trim().to_string();
+        let reason = if reason.is_empty() { "rejected by operator".to_string() } else { reason };
+        Some((id, Some(reason)))
+    } else {
+        None
+    }
+}
+
 async fn run_resolution_consumer(nervi: nervi_core::NerviClient, queue: Arc<PersistentApprovalQueue>, room_id: String) {
     let subject = inbound_subject("approval", &room_id);
     let durable_name = "charradissa-approval-resolution";
@@ -145,19 +164,7 @@ async fn run_resolution_consumer(nervi: nervi_core::NerviClient, queue: Arc<Pers
             }
         };
 
-        let content = msg.content.trim();
-        let outcome = if let Some(rest) = content.strip_prefix("/approve ") {
-            Some((rest.trim().to_string(), None))
-        } else if let Some(rest) = content.strip_prefix("/reject ") {
-            let mut parts = rest.splitn(2, ' ');
-            let id = parts.next().unwrap_or("").trim().to_string();
-            let reason = parts.next().unwrap_or("rejected by operator").trim().to_string();
-            Some((id, Some(reason)))
-        } else {
-            None
-        };
-
-        let Some((id, reason)) = outcome else { continue };
+        let Some((id, reason)) = parse_resolution_command(&msg.content) else { continue };
         if id.is_empty() {
             continue;
         }
@@ -221,5 +228,45 @@ mod tests {
         let outcome = ApprovalOutcome { status: "rejected".to_string(), reason: Some("too risky".to_string()) };
         let json = serde_json::to_string(&outcome).unwrap();
         assert!(json.contains("too risky"));
+    }
+
+    #[test]
+    fn parse_approve_command() {
+        assert_eq!(
+            parse_resolution_command("/approve abc123"),
+            Some(("abc123".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn parse_reject_command_with_reason() {
+        assert_eq!(
+            parse_resolution_command("/reject abc123 too risky"),
+            Some(("abc123".to_string(), Some("too risky".to_string())))
+        );
+    }
+
+    #[test]
+    fn parse_reject_command_without_reason_defaults() {
+        assert_eq!(
+            parse_resolution_command("/reject abc123"),
+            Some(("abc123".to_string(), Some("rejected by operator".to_string())))
+        );
+    }
+
+    #[test]
+    fn parse_reject_command_with_trailing_whitespace_and_no_reason_defaults() {
+        // Regression: splitn(2, ' ') on "abc123 " yields Some("") for the
+        // second part, not None -- unwrap_or's default never fired here
+        // before the empty-string check was added.
+        assert_eq!(
+            parse_resolution_command("/reject abc123 "),
+            Some(("abc123".to_string(), Some("rejected by operator".to_string())))
+        );
+    }
+
+    #[test]
+    fn parse_unrecognized_command_returns_none() {
+        assert_eq!(parse_resolution_command("hello there"), None);
     }
 }
