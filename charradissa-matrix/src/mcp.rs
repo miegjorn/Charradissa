@@ -29,7 +29,6 @@
 //! as a graceful `isError` tool result rather than a panic.
 
 use crate::client::AppserviceClient;
-use charradissa_core::approval::PersistentApprovalQueue;
 use charradissa_core::dm_registry::DmRegistry;
 use charradissa_core::types::{RoomId, UserId};
 use serde_json::{json, Value};
@@ -42,20 +41,11 @@ pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub struct MatrixMcp {
     client: Arc<AppserviceClient>,
     dm_registry: DmRegistry,
-    approval_queue: Arc<PersistentApprovalQueue>,
-    approval_room_id: String,
-    approval_timeout_minutes: u64,
 }
 
 impl MatrixMcp {
-    pub fn new(
-        client: Arc<AppserviceClient>,
-        dm_registry: DmRegistry,
-        approval_queue: Arc<PersistentApprovalQueue>,
-        approval_room_id: String,
-        approval_timeout_minutes: u64,
-    ) -> Self {
-        Self { client, dm_registry, approval_queue, approval_room_id, approval_timeout_minutes }
+    pub fn new(client: Arc<AppserviceClient>, dm_registry: DmRegistry) -> Self {
+        Self { client, dm_registry }
     }
 
     /// The tool definitions advertised by `tools/list`.
@@ -130,21 +120,6 @@ impl MatrixMcp {
                         "limit": {"type": "integer", "description": "Number of messages to fetch (1–20, default 20)"}
                     },
                     "required": ["room_id"]
-                }
-            }),
-            json!({
-                "name": "matrix_request_approval",
-                "description": "Post a pending action to the shared approval room and register it in the approval queue. Call this when you need human sign-off before continuing (e.g. a PR you opened needs review, or a destructive action needs approval). Returns an approval_id. STOP working after calling this — you will receive a Matrix message in your room when approved or rejected.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "component": {"type": "string", "description": "Your component name, e.g. amassada"},
-                        "category": {"type": "string", "description": "code | db | infra"},
-                        "description": {"type": "string", "description": "What needs approval — include PR URL or issue number"},
-                        "params": {"type": "object", "description": "Optional structured context (pr_url, issue_number, etc.)"},
-                        "source_room_id": {"type": "string", "description": "The Matrix room ID of the requesting agent's room. Used to send approval/rejection notifications back to the agent."}
-                    },
-                    "required": ["component", "category", "description"]
                 }
             }),
         ]
@@ -273,74 +248,7 @@ impl MatrixMcp {
                     })
                     .map_err(|e| e.to_string())
             }
-            "matrix_request_approval" => {
-                let component = required_str(args, "component")?;
-                let category = args.get("category").and_then(|v| v.as_str()).unwrap_or("code");
-                let description = required_str(args, "description")?;
-                // Merge component into params so appservice can surface it in notifications.
-                let mut merged: serde_json::Map<String, Value> = args
-                    .get("params")
-                    .and_then(|v| v.as_object())
-                    .cloned()
-                    .unwrap_or_default();
-                merged.insert("component".to_string(), Value::String(component.to_string()));
-                let params = Value::Object(merged);
-
-                let bot_uid = self.client.bot_user_id().to_string();
-                let source_room_id = args
-                    .get("source_room_id")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(&bot_uid);
-
-                let id = self.approval_queue
-                    .register(source_room_id, category, description, params)
-                    .map_err(|e| e.to_string())?;
-
-                let msg = format!(
-                    "⏳ **[{component}/{category}]** {description}\n   ID: `{id}`\n   Reply: `/approve {id}` or `/reject {id} <reason>`"
-                );
-                self.client
-                    .send_message(&RoomId::new(&self.approval_room_id), &msg)
-                    .await
-                    .map_err(|e| e.to_string())?;
-
-                self.wait_for_resolution(&id).await
-            }
             other => Err(format!("unknown tool: {other}")),
-        }
-    }
-
-    /// Poll the approval queue until `id` resolves or the configured timeout elapses.
-    /// Fails closed: a timeout is treated as a rejection, never as an approval.
-    async fn wait_for_resolution(&self, id: &str) -> std::result::Result<String, String> {
-        use charradissa_core::approval::ApprovalStatus;
-
-        let poll_interval = std::time::Duration::from_secs(5);
-        let deadline = tokio::time::Instant::now()
-            + std::time::Duration::from_secs(self.approval_timeout_minutes * 60);
-
-        loop {
-            if let Some(record) = self.approval_queue.get(id) {
-                match record.status {
-                    ApprovalStatus::Approved => {
-                        return Ok(format!("approval_id: {id} — approved. Proceed."));
-                    }
-                    ApprovalStatus::Rejected(reason) => {
-                        return Err(format!("approval_id: {id} — rejected: {reason}"));
-                    }
-                    ApprovalStatus::Pending => {}
-                }
-            }
-            if tokio::time::Instant::now() >= deadline {
-                let _ = self.approval_queue.reject(id, "timeout".to_string());
-                return Err(format!(
-                    "approval_id: {id} — timed out after {} minutes waiting for approval. \
-                     Treated as rejected. Do not merge.",
-                    self.approval_timeout_minutes
-                ));
-            }
-            tokio::time::sleep(poll_interval).await;
         }
     }
 }
@@ -380,36 +288,26 @@ mod tests {
     }
 
     fn mcp_for(server: &MockServer, reg: DmRegistry) -> MatrixMcp {
-        mcp_for_with_queue(server, reg, Arc::new(charradissa_core::approval::PersistentApprovalQueue::new(
-            std::env::temp_dir().join(format!("test-queue-{}.json", uuid::Uuid::new_v4())),
-        )))
-    }
-
-    fn mcp_for_with_queue(
-        server: &MockServer,
-        reg: DmRegistry,
-        approval_queue: Arc<charradissa_core::approval::PersistentApprovalQueue>,
-    ) -> MatrixMcp {
         let client = Arc::new(AppserviceClient::new(
             server.uri(),
             "test-as-token".to_string(),
             "@charradissa:occitane.guilhem".to_string(),
             "occitane.guilhem".to_string(),
         ));
-        MatrixMcp::new(client, reg, approval_queue, String::new(), 60)
+        MatrixMcp::new(client, reg)
     }
 
     // ---- tools/list & initialize ------------------------------------------------------
 
     #[tokio::test]
-    async fn tools_list_advertises_seven_tools() {
+    async fn tools_list_advertises_six_tools() {
         let server = MockServer::start().await;
         let mcp = mcp_for(&server, registry());
         let resp = mcp.handle(json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})).await;
         let tools = resp["result"]["tools"].as_array().expect("tools array");
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-        assert_eq!(names.len(), 7);
-        for expected in ["matrix_send", "matrix_invite", "matrix_kick", "matrix_get_dm", "matrix_leave", "matrix_read", "matrix_request_approval"] {
+        assert_eq!(names.len(), 6);
+        for expected in ["matrix_send", "matrix_invite", "matrix_kick", "matrix_get_dm", "matrix_leave", "matrix_read"] {
             assert!(names.contains(&expected), "missing tool {expected}");
         }
     }
@@ -671,67 +569,5 @@ mod tests {
         let mcp = mcp_for(&server, registry());
         let out = mcp.call_tool("matrix_teleport", &json!({})).await;
         assert!(out.is_err());
-    }
-
-    // ---- matrix_request_approval blocking behavior -------------------------------------
-
-    #[tokio::test(start_paused = true)]
-    async fn matrix_request_approval_blocks_until_approved() {
-        let server = MockServer::start().await;
-        Mock::given(method("PUT"))
-            .and(path_regex(r"^/_matrix/client/v3/rooms/.*/send/m\.room\.message/.*$"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"event_id": "$e"})))
-            .mount(&server)
-            .await;
-        let approval_queue = Arc::new(charradissa_core::approval::PersistentApprovalQueue::new(
-            std::env::temp_dir().join(format!("test-queue-{}.json", uuid::Uuid::new_v4())),
-        ));
-        let mcp = Arc::new(mcp_for_with_queue(&server, registry(), Arc::clone(&approval_queue)));
-
-        let approver_queue = Arc::clone(&approval_queue);
-        tokio::spawn(async move {
-            // Wait for the record to show up, then approve it.
-            loop {
-                if let Some(record) = approver_queue.list_pending().into_iter().next() {
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                    approver_queue.approve(&record.id).expect("approve should succeed");
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-        });
-
-        let result = mcp
-            .call_tool("matrix_request_approval", &json!({"component": "amassada", "description": "test PR"}))
-            .await;
-        assert!(result.is_ok(), "expected approval to resolve Ok, got {result:?}");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn matrix_request_approval_times_out_and_rejects() {
-        let server = MockServer::start().await;
-        Mock::given(method("PUT"))
-            .and(path_regex(r"^/_matrix/client/v3/rooms/.*/send/m\.room\.message/.*$"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"event_id": "$e"})))
-            .mount(&server)
-            .await;
-        let approval_queue = Arc::new(charradissa_core::approval::PersistentApprovalQueue::new(
-            std::env::temp_dir().join(format!("test-queue-{}.json", uuid::Uuid::new_v4())),
-        ));
-        let client = Arc::new(AppserviceClient::new(
-            server.uri(),
-            "test-as-token".to_string(),
-            "@charradissa:occitane.guilhem".to_string(),
-            "occitane.guilhem".to_string(),
-        ));
-        // timeout_minutes = 0 → deadline is "now", so the first poll check times out
-        // immediately without waiting a full interval. Deterministic under start_paused.
-        let mcp = MatrixMcp::new(client, registry(), Arc::clone(&approval_queue), String::new(), 0);
-
-        let result = mcp
-            .call_tool("matrix_request_approval", &json!({"component": "amassada", "description": "test PR"}))
-            .await;
-        assert!(result.is_err(), "expected timeout to reject, got {result:?}");
-        assert!(result.unwrap_err().contains("timed out"));
     }
 }

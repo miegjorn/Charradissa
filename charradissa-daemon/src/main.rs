@@ -1,5 +1,4 @@
 mod registry;
-mod queue_api;
 mod mcp_api;
 mod approval_relay;
 
@@ -12,7 +11,6 @@ use charradissa_matrix::backend::{MatrixBackend, RoomProvisioningParams};
 use charradissa_matrix::appservice::AppserviceState;
 use charradissa_core::responder::Responder;
 use axum::{routing::put, Router};
-use charradissa_core::approval::PersistentApprovalQueue;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -85,11 +83,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tracing::info!("charradissa-daemon starting for org: {}", config.org.name);
-
-    let queue_file = std::env::var("CHARRADISSA_QUEUE_FILE")
-        .unwrap_or_else(|_| "charradissa-queue.json".into());
-    let persistent_queue = Arc::new(PersistentApprovalQueue::new(queue_file.into()));
-    let queue_state = queue_api::QueueState { queue: Arc::clone(&persistent_queue) };
 
     let appservice_port = charradissa_core::config::listen_port();
 
@@ -169,7 +162,6 @@ async fn main() -> anyhow::Result<()> {
         self_user_id: bot_user_id.clone(),
         component_agents,
         project_routes,
-        approval_queue: Arc::clone(&persistent_queue),
         kroki_url,
     };
 
@@ -185,19 +177,8 @@ async fn main() -> anyhow::Result<()> {
         });
     tracing::info!("Matrix MCP: DM registry loaded with {} entries", dm_registry.len());
 
-    let approval_room_id = std::env::var("APPROVAL_ROOM_ID").unwrap_or_else(|_| {
-        tracing::warn!("APPROVAL_ROOM_ID not set — matrix_request_approval will fail to post notifications");
-        String::new()
-    });
-
     let matrix_mcp = std::sync::Arc::new(
-        charradissa_matrix::mcp::MatrixMcp::new(
-            backend.appservice_client(),
-            dm_registry,
-            Arc::clone(&persistent_queue),
-            approval_room_id,
-            config.approval.timeout_minutes,
-        ),
+        charradissa_matrix::mcp::MatrixMcp::new(backend.appservice_client(), dm_registry),
     );
 
     let app = Router::new()
@@ -205,7 +186,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/_matrix/app/v1/transactions/:txnId",
             put(charradissa_matrix::appservice::handle_transaction))
         .with_state(appservice_state)
-        .merge(queue_api::router(queue_state))
         .merge(mcp_api::router(mcp_api::McpState { mcp: matrix_mcp }));
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", appservice_port)).await?;
