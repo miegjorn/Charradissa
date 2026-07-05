@@ -18,8 +18,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Charradissa → amassada-core → fondament-core (transitive path deps).
-      # Check out both upstream repos as named build contexts.
+      # Charradissa → amassada-core → fondament-core (transitive path deps),
+      # plus corrier-core and nervi-core (approval-queue Nervi consumers).
+      # Check out all four upstream repos as named build contexts.
       - uses: actions/checkout@v4
         with:
           repository: miegjorn/Amassada
@@ -29,6 +30,16 @@ jobs:
         with:
           repository: miegjorn/Fondament
           path: fondament-src
+          token: ${{ secrets.MIEGJORN_CI_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          repository: miegjorn/Corrier
+          path: corrier-src
+          token: ${{ secrets.MIEGJORN_CI_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          repository: miegjorn/nervi
+          path: nervi-src
           token: ${{ secrets.MIEGJORN_CI_TOKEN }}
 
       - uses: docker/setup-buildx-action@v3
@@ -52,6 +63,8 @@ jobs:
           build-contexts: |
             amassada=./amassada-src
             fondament=./fondament-src
+            corrier=./corrier-src
+            nervi=./nervi-src
           cache-from: type=gha,scope=${{ github.workflow }}
           cache-to: type=gha,mode=max,scope=${{ github.workflow }}
 
