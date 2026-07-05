@@ -13,7 +13,8 @@
 
 use charradissa_core::approval::PersistentApprovalQueue;
 use corrier_core::agent_subjects::{mint_approval_status_subject, APPROVAL_REQUEST_SUBJECT};
-use corrier_core::chat_subjects::{inbound_subject, outbound_subject};
+use corrier_core::chat_subjects::{inbound_subject, publish_outbound};
+use corrier_core::ChatReply;
 use futures::StreamExt;
 use std::sync::Arc;
 
@@ -24,14 +25,6 @@ struct ApprovalRequest {
     description: String,
     #[serde(default)]
     params: serde_json::Value,
-}
-
-#[derive(serde::Serialize)]
-struct ApprovalPost {
-    component: String,
-    category: String,
-    description: String,
-    id: String,
 }
 
 #[derive(serde::Serialize)]
@@ -90,29 +83,16 @@ async fn run_request_consumer(nervi: nervi_core::NerviClient, queue: Arc<Persist
             }
         };
 
-        let post = ApprovalPost {
-            component: req.component,
-            category: req.category,
-            description: req.description,
-            id: id.clone(),
+        let content = format!(
+            "⏳ **[{}/{}]** {}\n   ID: `{}`\n   Reply: `/approve {}` or `/reject {} <reason>`",
+            req.component, req.category, req.description, id, id, id
+        );
+        let reply = ChatReply {
+            conversation_id: room_id.clone(),
+            content,
+            adapter: "matrix".to_string(),
         };
-        let subject = outbound_subject("approval", &room_id);
-        let payload = match serde_json::to_string(&post) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::error!("approval_relay: failed to encode post for {}: {}", id, e);
-                continue;
-            }
-        };
-        if let Err(e) = nervi
-            .publish(nervi_core::client::PublishOptions {
-                subject,
-                payload,
-                qualifier: Some("info".to_string()),
-                timestamp: Some(chrono::Utc::now().to_rfc3339()),
-            })
-            .await
-        {
+        if let Err(e) = publish_outbound(&nervi, "approval", &reply).await {
             tracing::error!("approval_relay: publish for {} failed: {}", id, e);
         }
     }
