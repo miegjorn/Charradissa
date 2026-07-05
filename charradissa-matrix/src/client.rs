@@ -412,6 +412,31 @@ impl AppserviceClient {
         Ok(RoomId::new(room_id))
     }
 
+    /// Force `user_id` to join `room_id` via the Synapse Admin API.
+    ///
+    /// Unlike the client-API [`join_room`](Self::join_room), this does **not**
+    /// require a pending invite or a public room. It is how the appservice bot
+    /// gets into the shared approval room, which is created externally (its ID is
+    /// injected via `APPROVAL_ROOM_ID`) and never invites the bot — a plain join
+    /// there 403s. Requires a Synapse server-admin token, distinct from the AS
+    /// token. Idempotent: force-joining an existing member returns success.
+    pub async fn admin_join_room(&self, admin_token: &str, room_id: &RoomId, user_id: &str) -> Result<()> {
+        let url = format!(
+            "{}/_synapse/admin/v1/join/{}",
+            self.homeserver, pct(room_id.as_str())
+        );
+        let resp = self.client.post(&url)
+            .header("Authorization", format!("Bearer {}", admin_token))
+            .json(&serde_json::json!({ "user_id": user_id }))
+            .send().await
+            .map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            return Err(CharradissaError::Backend(format!("admin_join_room failed: {}", status)));
+        }
+        Ok(())
+    }
+
     /// Join `#{alias_local}:{server_name}` if it exists; create it with `name` on 404.
     /// Returns the room_id in both cases. Idempotent.
     pub async fn create_or_join_aliased_room(
@@ -728,6 +753,72 @@ mod tests {
         let result = client.create_or_join_aliased_room("amassada", "Amassada Room", None).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().as_str(), "!newroom:occitane.guilhem");
+    }
+
+    /// #46: admin_join_room hits the Synapse Admin API with a Bearer admin token
+    /// (not the AS token) and passes the target user_id in the body.
+    #[tokio::test]
+    async fn admin_join_room_uses_admin_api_and_bearer_token() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::{method, path, header, body_partial_json};
+
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/_synapse/admin/v1/join/%21approval%3Aoccitane.guilhem"))
+            .and(header("Authorization", "Bearer admin-secret"))
+            .and(body_partial_json(serde_json::json!({
+                "user_id": "@charradissa-relay:occitane.guilhem"
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "room_id": "!approval:occitane.guilhem" }))
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = AppserviceClient::new(
+            mock_server.uri(),
+            "as-token".to_string(),
+            "@charradissa-relay:occitane.guilhem".to_string(),
+            "occitane.guilhem".to_string(),
+        );
+
+        let room = RoomId::new("!approval:occitane.guilhem");
+        let result = client
+            .admin_join_room("admin-secret", &room, "@charradissa-relay:occitane.guilhem")
+            .await;
+        assert!(result.is_ok(), "admin_join_room should succeed: {:?}", result.err());
+    }
+
+    /// #46: a non-2xx from the admin API surfaces as an error (so the caller can
+    /// fall back to a plain join).
+    #[tokio::test]
+    async fn admin_join_room_errors_on_non_success() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::{method, path};
+
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/_synapse/admin/v1/join/%21approval%3Aoccitane.guilhem"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&mock_server)
+            .await;
+
+        let client = AppserviceClient::new(
+            mock_server.uri(),
+            "as-token".to_string(),
+            "@charradissa-relay:occitane.guilhem".to_string(),
+            "occitane.guilhem".to_string(),
+        );
+
+        let room = RoomId::new("!approval:occitane.guilhem");
+        let result = client
+            .admin_join_room("admin-secret", &room, "@charradissa-relay:occitane.guilhem")
+            .await;
+        assert!(result.is_err(), "admin_join_room should error on 403");
     }
 
     /// Charradissa #20: a component room must grant the owning agent PL 100 and

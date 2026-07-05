@@ -57,6 +57,39 @@ impl MatrixBackend {
         Ok(())
     }
 
+    /// Ensure the appservice bot is a member of the shared approval room so that
+    /// `matrix_request_approval` can post into it (issue #46).
+    ///
+    /// The approval room is created **externally** and only its ID reaches
+    /// Charradissa (via `APPROVAL_ROOM_ID`); the bot is never invited, so every
+    /// approval post 403s until the bot joins. Because all components post through
+    /// the single appservice sender, ensuring that one identity is a member
+    /// remediates every component at once (not just the one that first hit #46).
+    ///
+    /// Prefers the Synapse Admin API force-join (works without a pending invite,
+    /// which is exactly the externally-created-room case); falls back to a plain
+    /// appservice join when no admin token is configured. Best-effort and
+    /// idempotent — an already-joined bot is a no-op.
+    pub async fn provision_approval_room(&self, room_id: &RoomId, admin_token: Option<&str>) -> Result<()> {
+        let bot = self.client.bot_user_id().to_string();
+        if let Some(token) = admin_token.filter(|t| !t.is_empty()) {
+            match self.client.admin_join_room(token, room_id, &bot).await {
+                Ok(()) => {
+                    tracing::info!(
+                        "approval room {}: ensured {} is a member (admin force-join)",
+                        room_id.as_str(), bot
+                    );
+                    return Ok(());
+                }
+                Err(e) => tracing::warn!(
+                    "approval room {}: admin force-join failed ({}); falling back to plain join",
+                    room_id.as_str(), e
+                ),
+            }
+        }
+        self.client.join_room(room_id.as_str()).await.map(|_| ())
+    }
+
     /// Discover project components from Farga, resolve system prompts from Fondament,
     /// create-or-join aliased rooms, and return a room_id → Responder map.
     /// Returns a map of room_id → (agent_localpart, Responder) so callers can send
@@ -455,6 +488,91 @@ mod tests {
         assert!(result.is_ok(), "provision_project_rooms should succeed: {:?}", result.err());
         let map = result.unwrap();
         assert_eq!(map.len(), 1, "expected exactly one component room in the map");
+    }
+
+    /// #46: with an admin token, the bot is force-joined into the approval room
+    /// via the Synapse Admin API (no client-API /join, which would 403 on the
+    /// externally-created room). The joined user is the appservice bot.
+    #[tokio::test]
+    async fn provision_approval_room_admin_force_joins_the_bot() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::{method, path, body_partial_json};
+
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/_synapse/admin/v1/join/%21approval%3Aoccitane.guilhem"))
+            .and(body_partial_json(serde_json::json!({
+                "user_id": "@charradissa:occitane.guilhem"
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"room_id": "!approval:occitane.guilhem"}))
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let backend = backend_for_test(&mock.uri());
+        let room = RoomId::new("!approval:occitane.guilhem");
+        let result = backend.provision_approval_room(&room, Some("admin-token")).await;
+        assert!(result.is_ok(), "admin force-join should succeed: {:?}", result.err());
+    }
+
+    /// #46: without an admin token, fall back to a plain appservice /join. This
+    /// succeeds when an invite is already pending (the operational unblock path).
+    #[tokio::test]
+    async fn provision_approval_room_falls_back_to_plain_join_without_admin_token() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::{method, path};
+
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/_matrix/client/v3/join/%21approval%3Aoccitane.guilhem"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"room_id": "!approval:occitane.guilhem"}))
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let backend = backend_for_test(&mock.uri());
+        let room = RoomId::new("!approval:occitane.guilhem");
+        let result = backend.provision_approval_room(&room, None).await;
+        assert!(result.is_ok(), "plain-join fallback should succeed: {:?}", result.err());
+    }
+
+    /// #46: if the admin force-join fails (e.g. token lacks power), fall back to a
+    /// plain /join rather than giving up — belt-and-suspenders for provisioning.
+    #[tokio::test]
+    async fn provision_approval_room_falls_back_when_admin_join_fails() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::{method, path};
+
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/_synapse/admin/v1/join/%21approval%3Aoccitane.guilhem"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&mock)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/_matrix/client/v3/join/%21approval%3Aoccitane.guilhem"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"room_id": "!approval:occitane.guilhem"}))
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let backend = backend_for_test(&mock.uri());
+        let room = RoomId::new("!approval:occitane.guilhem");
+        let result = backend.provision_approval_room(&room, Some("weak-token")).await;
+        assert!(result.is_ok(), "should fall back to plain join on admin 403: {:?}", result.err());
     }
 
     /// Empty-prompt skip: Farga returns ["amassada"], Fondament returns 404.

@@ -175,6 +175,30 @@ async fn main() -> anyhow::Result<()> {
         String::new()
     });
 
+    // Ensure the appservice bot is a member of the shared approval room before it
+    // needs to post there. That room is created externally (its ID arrives via
+    // APPROVAL_ROOM_ID) and never invites the bot, so without this every
+    // matrix_request_approval 403s regardless of which component called it (#46).
+    // Best-effort — a failure here only degrades approval posting, which logs its
+    // own error, so it must not block startup.
+    if !approval_room_id.is_empty() {
+        let admin_token = std::env::var("SYNAPSE_ADMIN_TOKEN").ok();
+        match backend
+            .provision_approval_room(
+                &charradissa_core::types::RoomId::new(&approval_room_id),
+                admin_token.as_deref(),
+            )
+            .await
+        {
+            Ok(()) => tracing::info!("approval room {}: bot membership ensured", approval_room_id),
+            Err(e) => tracing::warn!(
+                "approval room {} membership provisioning failed ({}); \
+                 matrix_request_approval may 403 until the bot is invited manually",
+                approval_room_id, e
+            ),
+        }
+    }
+
     let matrix_mcp = std::sync::Arc::new(
         charradissa_matrix::mcp::MatrixMcp::new(
             backend.appservice_client(),
