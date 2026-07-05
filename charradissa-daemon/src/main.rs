@@ -1,6 +1,7 @@
 mod registry;
 mod queue_api;
 mod mcp_api;
+mod approval_relay;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -68,6 +69,20 @@ async fn main() -> anyhow::Result<()> {
 
     let concierge_archival = Arc::clone(&concierge);
     tokio::spawn(async move { concierge_archival.run_archival_loop().await; });
+
+    let approval_room_id = std::env::var("APPROVAL_ROOM_ID").unwrap_or_default();
+    if approval_room_id.is_empty() {
+        tracing::warn!("APPROVAL_ROOM_ID not set — approval relay will not start");
+    } else {
+        let nats_url = std::env::var("NATS_URL")
+            .unwrap_or_else(|_| "nats://nervi-nats.occitan-system.svc.cluster.local:4222".into());
+        let farga_url_for_approval = farga_base_url.clone();
+        tokio::spawn(async move {
+            if let Err(e) = approval_relay::run_approval_relay(&nats_url, &farga_url_for_approval, approval_room_id).await {
+                tracing::error!("approval relay exited: {}", e);
+            }
+        });
+    }
 
     tracing::info!("charradissa-daemon starting for org: {}", config.org.name);
 

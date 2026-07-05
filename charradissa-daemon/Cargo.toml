@@ -27,3 +27,6 @@ reqwest = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+corrier-core = { workspace = true }
+nervi-core = { workspace = true }
+futures = { workspace = true }

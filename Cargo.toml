@@ -26,3 +26,5 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 futures = "0.3"
 tokio-stream = "0.1"
+corrier-core = { path = "../Corrier/corrier-core" }
+nervi-core = { path = "../nervi/nervi-core" }
