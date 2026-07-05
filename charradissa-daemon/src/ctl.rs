@@ -9,63 +9,31 @@ use charradissa_core::approval::{ApprovalStatus, PersistentApprovalQueue};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-fn queue_path() -> PathBuf {
-    std::env::var("CHARRADISSA_QUEUE_FILE")
-        .unwrap_or_else(|_| "charradissa-queue.json".into())
-        .into()
-}
-
-fn base_url() -> Option<String> {
-    std::env::var("CHARRADISSA_BASE_URL").ok()
+fn farga_url() -> String {
+    std::env::var("FARGA_URL").unwrap_or_else(|_| "http://farga:7500".into())
 }
 
 fn morning() {
-    if let Some(url) = base_url() {
-        // Fetch from API
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        let result = rt.block_on(async {
-            let resp = reqwest::get(format!("{}/api/queue", url)).await?;
-            let json: serde_json::Value = resp.json().await?;
-            Ok::<serde_json::Value, reqwest::Error>(json)
-        });
-        match result {
-            Ok(json) => {
-                let count = json.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                println!("=== Morning Briefing ===");
-                println!("Pending approvals (from API): {}", count);
-                if let Some(pending) = json.get("pending").and_then(|v| v.as_array()) {
-                    for item in pending {
-                        let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-                        let room = item.get("room_id").and_then(|v| v.as_str()).unwrap_or("?");
-                        let cat = item.get("category").and_then(|v| v.as_str()).unwrap_or("?");
-                        let desc = item.get("description").and_then(|v| v.as_str()).unwrap_or("?");
-                        println!("  [{id}] room={room} [{cat}] {desc}");
-                    }
-                }
-            }
-            Err(e) => eprintln!("Error fetching from API: {}", e),
-        }
-    } else {
-        // Read queue file directly
-        let queue = PersistentApprovalQueue::new(queue_path());
-        let pending = queue.list_pending();
-        println!("=== Morning Briefing ===");
-        println!("Pending approvals: {}", pending.len());
-        for record in &pending {
-            println!(
-                "  [{}] room={} [{}] {}",
-                record.id, record.room_id, record.category, record.description
-            );
-        }
-        if pending.is_empty() {
-            println!("  (no pending approvals)");
-        }
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let queue = PersistentApprovalQueue::new(farga_url());
+    let pending = rt.block_on(queue.list_pending());
+    println!("=== Morning Briefing ===");
+    println!("Pending approvals: {}", pending.len());
+    for record in &pending {
+        println!(
+            "  [{}] room={} [{}] {}",
+            record.id, record.room_id, record.category, record.description
+        );
+    }
+    if pending.is_empty() {
+        println!("  (no pending approvals)");
     }
 }
 
 fn wrap() {
-    let queue = PersistentApprovalQueue::new(queue_path());
-    let all = queue.list_all();
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let queue = PersistentApprovalQueue::new(farga_url());
+    let all = rt.block_on(queue.list_all());
     let today = chrono::Utc::now().date_naive();
     let resolved_today: Vec<_> = all
         .iter()
@@ -91,58 +59,11 @@ fn wrap() {
     );
 }
 
-fn observe(room_id: &str) {
-    let base = base_url().unwrap_or_else(|| "http://localhost:8448".into());
-    let url = format!("{}/api/queue?room={}", base, room_id);
-    println!("=== Observing room: {} (polling every 5s) ===", room_id);
-    println!("  URL: {}", url);
-
-    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let mut seen_ids: HashSet<String> = HashSet::new();
-
-    rt.block_on(async {
-        loop {
-            match reqwest::get(&url).await {
-                Ok(resp) => {
-                    if let Ok(json) = resp.json::<serde_json::Value>().await {
-                        if let Some(pending) = json.get("pending").and_then(|v| v.as_array()) {
-                            for item in pending {
-                                let id = item
-                                    .get("id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                if !id.is_empty() && seen_ids.insert(id.clone()) {
-                                    let cat = item
-                                        .get("category")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("?");
-                                    let desc = item
-                                        .get("description")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("?");
-                                    println!("  NEW [{id}] [{cat}] {desc}");
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(e) => eprintln!("  poll error: {}", e),
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        }
-    });
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(|s| s.as_str()) {
         Some("morning") => morning(),
         Some("wrap") => wrap(),
-        Some("observe") => {
-            let room_id = args.get(2).map(|s| s.as_str()).unwrap_or("*");
-            observe(room_id);
-        }
         Some("service") => {
             // Service subcommand handled in ctl.rs via install
             if args.get(2).map(|s| s.as_str()) == Some("install") {
@@ -153,7 +74,7 @@ fn main() {
             }
         }
         _ => {
-            eprintln!("Usage: charradissa-ctl <morning|wrap|observe <room_id>|service install>");
+            eprintln!("Usage: charradissa-ctl <morning|wrap|service install>");
             std::process::exit(1);
         }
     }

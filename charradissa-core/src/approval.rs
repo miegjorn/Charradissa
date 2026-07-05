@@ -84,34 +84,38 @@ pub enum ApprovalStatus {
     Rejected(String),
 }
 
-/// Cross-space approval queue backed by a JSON file.
-/// Used by the HTTP API layer to expose approvals across rooms.
+/// Cross-space approval queue backed by Farga's generic KV store
+/// (`GET`/`PUT /kv/*path`), one entry per approval id under the `approval`
+/// namespace -- same convention `corrier-core::routing` and
+/// `caissa-cli::tick_poller` already use. State lives in Farga, not in any
+/// process's memory, so this is safe to consume from multiple replicas of
+/// the same daemon (see this plan's Global Constraints).
 pub struct PersistentApprovalQueue {
-    path: PathBuf,
+    farga_url: String,
 }
 
 impl PersistentApprovalQueue {
-    pub fn new(path: PathBuf) -> Self { Self { path } }
-
-    fn load(&self) -> Vec<PendingApprovalRecord> {
-        std::fs::read_to_string(&self.path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+    pub fn new(farga_url: String) -> Self {
+        Self { farga_url }
     }
 
-    fn save(&self, records: &[PendingApprovalRecord]) -> Result<()> {
-        let json = serde_json::to_string_pretty(records)
-            .map_err(|e| CharradissaError::Backend(e.to_string()))?;
-        std::fs::write(&self.path, json)
-            .map_err(|e| CharradissaError::Backend(e.to_string()))?;
-        Ok(())
+    fn kv_url(&self, id: &str) -> String {
+        format!("{}/kv/approval/{}", self.farga_url.trim_end_matches('/'), id)
     }
 
-    pub fn register(&self, room_id: &str, category: &str, description: &str, params: serde_json::Value) -> Result<String> {
-        let mut records = self.load();
+    fn namespace_url(&self) -> String {
+        format!("{}/kv/approval", self.farga_url.trim_end_matches('/'))
+    }
+
+    pub async fn register(
+        &self,
+        room_id: &str,
+        category: &str,
+        description: &str,
+        params: serde_json::Value,
+    ) -> Result<String> {
         let id = Uuid::new_v4().to_string();
-        records.push(PendingApprovalRecord {
+        let record = PendingApprovalRecord {
             id: id.clone(),
             room_id: room_id.to_string(),
             category: category.to_string(),
@@ -119,38 +123,79 @@ impl PersistentApprovalQueue {
             params,
             created_at: chrono::Utc::now(),
             status: ApprovalStatus::Pending,
-        });
-        self.save(&records)?;
+        };
+        let body = serde_json::json!({ "value": record });
+        let resp = reqwest::Client::new()
+            .put(self.kv_url(&id))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(CharradissaError::Backend(format!(
+                "farga approval PUT returned {}",
+                resp.status()
+            )));
+        }
         Ok(id)
     }
 
-    pub fn approve(&self, id: &str) -> Result<()> {
-        let mut records = self.load();
-        let record = records.iter_mut().find(|r| r.id == id)
-            .ok_or_else(|| CharradissaError::Backend(format!("unknown approval id: {}", id)))?;
-        record.status = ApprovalStatus::Approved;
-        self.save(&records)
+    pub async fn get(&self, id: &str) -> Option<PendingApprovalRecord> {
+        let resp = reqwest::Client::new().get(self.kv_url(id)).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let json: serde_json::Value = resp.json().await.ok()?;
+        let value = json.get("value")?;
+        serde_json::from_value(value.clone()).ok()
     }
 
-    pub fn reject(&self, id: &str, reason: String) -> Result<()> {
-        let mut records = self.load();
-        let record = records.iter_mut().find(|r| r.id == id)
+    async fn update_status(&self, id: &str, status: ApprovalStatus) -> Result<()> {
+        let mut record = self.get(id).await
             .ok_or_else(|| CharradissaError::Backend(format!("unknown approval id: {}", id)))?;
-        record.status = ApprovalStatus::Rejected(reason);
-        self.save(&records)
+        record.status = status;
+        let body = serde_json::json!({ "value": record });
+        let resp = reqwest::Client::new()
+            .put(self.kv_url(id))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| CharradissaError::Backend(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(CharradissaError::Backend(format!(
+                "farga approval PUT (update) returned {}",
+                resp.status()
+            )));
+        }
+        Ok(())
     }
 
-    pub fn list_pending(&self) -> Vec<PendingApprovalRecord> {
-        self.load().into_iter()
+    pub async fn approve(&self, id: &str) -> Result<()> {
+        self.update_status(id, ApprovalStatus::Approved).await
+    }
+
+    pub async fn reject(&self, id: &str, reason: String) -> Result<()> {
+        self.update_status(id, ApprovalStatus::Rejected(reason)).await
+    }
+
+    pub async fn list_all(&self) -> Vec<PendingApprovalRecord> {
+        let resp = match reqwest::Client::new().get(self.namespace_url()).send().await {
+            Ok(r) if r.status().is_success() => r,
+            _ => return vec![],
+        };
+        #[derive(serde::Deserialize)]
+        struct KvListEntry {
+            value: PendingApprovalRecord,
+        }
+        let entries: Vec<KvListEntry> = resp.json().await.unwrap_or_default();
+        entries.into_iter().map(|e| e.value).collect()
+    }
+
+    pub async fn list_pending(&self) -> Vec<PendingApprovalRecord> {
+        self.list_all()
+            .await
+            .into_iter()
             .filter(|r| r.status == ApprovalStatus::Pending)
             .collect()
-    }
-
-    pub fn list_all(&self) -> Vec<PendingApprovalRecord> {
-        self.load()
-    }
-
-    pub fn get(&self, id: &str) -> Option<PendingApprovalRecord> {
-        self.load().into_iter().find(|r| r.id == id)
     }
 }
