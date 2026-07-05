@@ -7,7 +7,7 @@ fn temp_queue() -> PersistentApprovalQueue {
 #[tokio::test]
 async fn register_against_unreachable_farga_returns_err_not_panic() {
     let queue = temp_queue();
-    let result = queue.register("!room:s", "code", "test PR", serde_json::json!({})).await;
+    let result = queue.register("test-id-1", "!room:s", "code", "test PR", serde_json::json!({})).await;
     assert!(result.is_err());
 }
 

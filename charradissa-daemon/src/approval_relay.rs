@@ -13,13 +13,14 @@
 
 use charradissa_core::approval::PersistentApprovalQueue;
 use corrier_core::agent_subjects::{mint_approval_status_subject, APPROVAL_REQUEST_SUBJECT};
-use corrier_core::chat_subjects::{inbound_subject, publish_outbound};
+use corrier_core::chat_subjects::publish_outbound;
 use corrier_core::ChatReply;
 use futures::StreamExt;
 use std::sync::Arc;
 
 #[derive(serde::Deserialize)]
 struct ApprovalRequest {
+    id: String,
     component: String,
     category: String,
     description: String,
@@ -45,7 +46,7 @@ pub async fn run_approval_relay(nats_url: &str, farga_url: &str, room_id: String
         run_request_consumer(nervi_a, queue_a, room_a).await;
     });
 
-    run_resolution_consumer(nervi, queue, room_id).await;
+    run_resolution_consumer(nervi, queue).await;
     Ok(())
 }
 
@@ -75,17 +76,14 @@ async fn run_request_consumer(nervi: nervi_core::NerviClient, queue: Arc<Persist
             }
         };
 
-        let id = match queue.register(&room_id, &req.category, &req.description, req.params).await {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::error!("approval_relay: register failed: {}", e);
-                continue;
-            }
-        };
+        if let Err(e) = queue.register(&req.id, &room_id, &req.category, &req.description, req.params).await {
+            tracing::error!("approval_relay: register failed: {}", e);
+            continue;
+        }
 
         let content = format!(
             "⏳ **[{}/{}]** {}\n   ID: `{}`\n   Reply: `/approve {}` or `/reject {} <reason>`",
-            req.component, req.category, req.description, id, id, id
+            req.component, req.category, req.description, req.id, req.id, req.id
         );
         let reply = ChatReply {
             conversation_id: room_id.clone(),
@@ -93,7 +91,7 @@ async fn run_request_consumer(nervi: nervi_core::NerviClient, queue: Arc<Persist
             adapter: "matrix".to_string(),
         };
         if let Err(e) = publish_outbound(&nervi, "approval", &reply).await {
-            tracing::error!("approval_relay: publish for {} failed: {}", id, e);
+            tracing::error!("approval_relay: publish for {} failed: {}", req.id, e);
         }
     }
 }
@@ -117,10 +115,8 @@ fn parse_resolution_command(content: &str) -> Option<(String, Option<String>)> {
     }
 }
 
-async fn run_resolution_consumer(nervi: nervi_core::NerviClient, queue: Arc<PersistentApprovalQueue>, room_id: String) {
-    let subject = inbound_subject("approval", &room_id);
-    let durable_name = "charradissa-approval-resolution";
-    let mut stream = match nervi.consume_durable(&subject, durable_name).await {
+async fn run_resolution_consumer(nervi: nervi_core::NerviClient, queue: Arc<PersistentApprovalQueue>) {
+    let mut stream = match corrier_core::chat_subjects::consume_inbound(&nervi, "approval").await {
         Ok(s) => Box::pin(s),
         Err(e) => {
             tracing::error!("approval_relay: failed to open resolution consumer: {}", e);
@@ -129,17 +125,10 @@ async fn run_resolution_consumer(nervi: nervi_core::NerviClient, queue: Arc<Pers
     };
 
     while let Some(result) = stream.next().await {
-        let raw = match result {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("approval_relay: resolution delivery error (non-fatal): {}", e);
-                continue;
-            }
-        };
-        let msg: corrier_core::ChatMessage = match serde_json::from_str(&raw.payload) {
+        let msg = match result {
             Ok(m) => m,
             Err(e) => {
-                tracing::warn!("approval_relay: failed to decode inbound chat message (non-fatal): {}", e);
+                tracing::warn!("approval_relay: resolution delivery error (non-fatal): {}", e);
                 continue;
             }
         };
@@ -190,8 +179,9 @@ mod tests {
 
     #[test]
     fn approval_request_deserializes_with_default_params() {
-        let json = r#"{"component":"gardian","category":"code","description":"test"}"#;
+        let json = r#"{"id":"appr-test123","component":"gardian","category":"code","description":"test"}"#;
         let req: ApprovalRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.id, "appr-test123");
         assert_eq!(req.component, "gardian");
         assert_eq!(req.params, serde_json::Value::Null);
     }

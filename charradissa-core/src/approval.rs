@@ -109,14 +109,14 @@ impl PersistentApprovalQueue {
 
     pub async fn register(
         &self,
+        id: &str,
         room_id: &str,
         category: &str,
         description: &str,
         params: serde_json::Value,
-    ) -> Result<String> {
-        let id = Uuid::new_v4().to_string();
+    ) -> Result<()> {
         let record = PendingApprovalRecord {
-            id: id.clone(),
+            id: id.to_string(),
             room_id: room_id.to_string(),
             category: category.to_string(),
             description: description.to_string(),
@@ -126,7 +126,7 @@ impl PersistentApprovalQueue {
         };
         let body = serde_json::json!({ "value": record });
         let resp = reqwest::Client::new()
-            .put(self.kv_url(&id))
+            .put(self.kv_url(id))
             .json(&body)
             .send()
             .await
@@ -137,7 +137,7 @@ impl PersistentApprovalQueue {
                 resp.status()
             )));
         }
-        Ok(id)
+        Ok(())
     }
 
     pub async fn get(&self, id: &str) -> Option<PendingApprovalRecord> {
