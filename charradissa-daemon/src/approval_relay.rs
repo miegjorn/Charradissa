@@ -96,6 +96,16 @@ async fn run_request_consumer(nervi: nervi_core::NerviClient, queue: Arc<Persist
     }
 }
 
+/// Format the ACK posted back into the approval room after a resolution,
+/// so a human watching the room can follow the flow without checking Farga
+/// or the requester's own status subject separately.
+fn format_ack(id: &str, reason: &Option<String>) -> String {
+    match reason {
+        None => format!("✅ `{}` approved.", id),
+        Some(r) => format!("❌ `{}` rejected: {}", id, r),
+    }
+}
+
 /// Parse a `/approve <id>` or `/reject <id> [reason]` chat message into
 /// (id, reason) -- `None` reason means approve, `Some` means reject. A
 /// missing or blank reason after `/reject <id>` defaults to "rejected by
@@ -150,7 +160,7 @@ async fn run_resolution_consumer(nervi: nervi_core::NerviClient, queue: Arc<Pers
         let status_subject = mint_approval_status_subject(&id);
         let outcome_payload = ApprovalOutcome {
             status: if reason.is_none() { "approved".to_string() } else { "rejected".to_string() },
-            reason,
+            reason: reason.clone(),
         };
         let payload = match serde_json::to_string(&outcome_payload) {
             Ok(p) => p,
@@ -169,6 +179,15 @@ async fn run_resolution_consumer(nervi: nervi_core::NerviClient, queue: Arc<Pers
             .await
         {
             tracing::error!("approval_relay: status publish for {} failed: {}", id, e);
+        }
+
+        let ack = ChatReply {
+            conversation_id: msg.conversation_id.clone(),
+            content: format_ack(&id, &reason),
+            adapter: "matrix".to_string(),
+        };
+        if let Err(e) = publish_outbound(&nervi, "approval", &ack).await {
+            tracing::error!("approval_relay: ACK post for {} failed: {}", id, e);
         }
     }
 }
@@ -238,5 +257,18 @@ mod tests {
     #[test]
     fn parse_unrecognized_command_returns_none() {
         assert_eq!(parse_resolution_command("hello there"), None);
+    }
+
+    #[test]
+    fn format_ack_for_approval() {
+        assert_eq!(format_ack("abc123", &None), "✅ `abc123` approved.");
+    }
+
+    #[test]
+    fn format_ack_for_rejection_includes_reason() {
+        assert_eq!(
+            format_ack("abc123", &Some("too risky".to_string())),
+            "❌ `abc123` rejected: too risky"
+        );
     }
 }
